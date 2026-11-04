@@ -13,9 +13,16 @@ help: ## List the available targets
 
 .PHONY: init
 init: ## Install dependencies and git hooks
-	uv --directory backend sync --locked
-	$(PNPM) install --frozen-lockfile
+init: init-backend init-frontend
 	$(UV_RUN) --frozen pre-commit install
+
+.PHONY: init-backend
+init-backend: ## Install backend dependencies from uv.lock
+	uv --directory backend sync --locked
+
+.PHONY: init-frontend
+init-frontend: ## Install frontend dependencies from pnpm-lock.yaml
+	$(PNPM) install --frozen-lockfile
 
 .PHONY: check
 check: ## Format, lint (with fixes) and type-check backend and frontend

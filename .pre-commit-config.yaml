@@ -61,6 +61,11 @@ repos:
         entry: uv --project backend run --frozen detect-private-key
         language: system
         types: [text]
+      - id: check-github-workflows
+        name: validate GitHub workflows
+        entry: uv --project backend run --frozen check-jsonschema --builtin-schema vendor.github-workflows
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
       - id: check-compose
         name: validate compose files
         entry: uv --project backend run --frozen check-jsonschema --builtin-schema vendor.compose-spec
