@@ -5,6 +5,9 @@ services:
     build:
       context: backend
       target: runtime
+    env_file:
+      - path: .env
+        required: false
 
   frontend:
     build:
