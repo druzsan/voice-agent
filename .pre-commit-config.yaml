@@ -61,6 +61,11 @@ repos:
         entry: uv --project backend run --frozen detect-private-key
         language: system
         types: [text]
+      - id: check-compose
+        name: validate compose files
+        entry: uv --project backend run --frozen check-jsonschema --builtin-schema vendor.compose-spec
+        language: system
+        files: ^compose(\..+)?\.ya?ml$
 
   # Backend
   - repo: local

@@ -5,6 +5,7 @@ MAKEFLAGS += --warn-undefined-variables --no-builtin-rules
 
 UV_RUN := uv --directory backend run
 PNPM := pnpm --dir frontend
+DEV_COMPOSE := docker compose -f compose.yaml -f compose.dev.yaml
 
 .PHONY: help
 help: ## List the available targets
@@ -47,3 +48,31 @@ test-backend: ## Run backend tests (pytest)
 .PHONY: test-frontend
 test-frontend: ## Run frontend tests (vitest)
 	$(PNPM) test
+
+.PHONY: build
+build: ## Build the production images
+	docker compose build
+
+.PHONY: run
+run: ## Run the production-like stack on http://localhost:8080
+	docker compose up --build
+
+.PHONY: dev
+dev: ## Run the dev stack with hot reload on http://localhost:8080 (backend on :8000)
+	@# Mount points for the volumes that hide .venv / node_modules (can't be created inside the read-only mounts)
+	mkdir -p backend/.venv frontend/node_modules
+	@# Fresh containers, so the volumes are filled from the current images (removes only anonymous volumes)
+	$(DEV_COMPOSE) rm --stop --force --volumes
+	$(DEV_COMPOSE) up --build
+
+.PHONY: down
+down: ## Stop and remove the containers
+	$(DEV_COMPOSE) down
+
+.PHONY: logs
+logs: ## Follow the container logs
+	$(DEV_COMPOSE) logs --follow
+
+.PHONY: clean
+clean: ## Remove containers, volumes and the locally built images
+	$(DEV_COMPOSE) down --volumes --rmi local

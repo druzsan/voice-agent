@@ -1,0 +1,29 @@
+# Development mode on top of compose.yaml: `make dev`, then open http://localhost:8080
+# (the backend is also published on http://localhost:8000).
+# The project folders are mounted read-only from the working tree: fastapi dev
+# reloads on backend changes, and Vite updates the page in place. The anonymous
+# volumes hide the host's .venv and node_modules, so the containers keep using
+# the dependencies installed in their images. Changed dependencies need another
+# `make dev`, which rebuilds the images and recreates the containers with fresh
+# volumes.
+# Their mount points must exist on the host (Docker can't create them inside
+# the read-only mounts); `make dev` creates them.
+
+services:
+  backend:
+    build:
+      target: dev
+    ports:
+      - 127.0.0.1:8000:8000
+    volumes:
+      - ./backend:/app:ro
+      - /app/.venv
+
+  frontend:
+    build:
+      target: dev
+    environment:
+      BACKEND_URL: http://backend:8000
+    volumes:
+      - ./frontend:/app:ro
+      - /app/node_modules

@@ -2,7 +2,24 @@
 
 Voice agent for automotive customer complaints
 
-## Prerequisites
+## Setup
+
+Requires Docker with Compose v2.
+
+The `make` targets are only shortcuts. Without `make`, run the commands from the matching target in the [Makefile](Makefile) yourself, e.g. `docker compose up --build` instead of `make run`.
+
+```sh
+make run   # production-like (nginx + backend) on http://localhost:8080
+make dev   # hot reload on http://localhost:8080, backend also on http://localhost:8000
+make logs  # follow the container logs
+make down  # stop and remove the containers
+```
+
+Run `make` to list all targets.
+
+## Local development
+
+### Prerequisites
 
 Python, uv, Node.js and pnpm in the versions listed in [.tool-versions](.tool-versions). You can install them any way you like.
 
@@ -16,7 +33,7 @@ asdf plugin add pnpm
 asdf install
 ```
 
-## Install dependencies
+### Install dependencies
 
 Installs the backend and frontend dependencies from the lockfiles and the pre-commit git hook:
 
@@ -24,7 +41,7 @@ Installs the backend and frontend dependencies from the lockfiles and the pre-co
 make init
 ```
 
-## Run
+### Run
 
 Backend (FastAPI on http://127.0.0.1:8000, API docs at http://127.0.0.1:8000/docs):
 
@@ -38,12 +55,10 @@ Frontend (Vite on http://127.0.0.1:5173, proxies `/api` to the backend):
 pnpm --dir frontend dev
 ```
 
-## Checks and tests
+### Checks and tests
 
 ```sh
 make check       # format, lint (with fixes) and type-check backend and frontend
 make pre-commit  # run all pre-commit hooks on all files
 make test        # run backend and frontend tests
 ```
-
-Run `make` to list all targets.
