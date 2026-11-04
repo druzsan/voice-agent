@@ -11,3 +11,10 @@ __pycache__/
 
 .env
 /dev/
+
+# Node / Vite
+node_modules/
+dist/
+coverage/
+*.local
+*.tsbuildinfo
