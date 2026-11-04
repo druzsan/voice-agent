@@ -1,0 +1,6 @@
+# Allowlist: only the dependency manifests and the app code reach the build
+*
+!pyproject.toml
+!uv.lock
+!voice_agent/
+**/__pycache__

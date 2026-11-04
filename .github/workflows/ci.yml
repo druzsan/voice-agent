@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Use the Python from setup-python (.tool-versions), never a uv-managed one
+  UV_PYTHON_DOWNLOADS: never
+
+jobs:
+  checks:
+    name: "🔍 Generic checks"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .tool-versions
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version-file: .tool-versions
+          cache-dependency-glob: backend/uv.lock
+      - run: make init-backend
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - run: make pre-commit
+        env:
+          SKIP: ruff-check,ruff-format,pyright,uv-lock-check,eslint,prettier,tsc
+      - if: failure()
+        run: git diff
+
+  check-backend:
+    name: "🔍 Backend checks"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .tool-versions
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version-file: .tool-versions
+          cache-dependency-glob: backend/uv.lock
+      - run: make init-backend
+      - run: make check-backend
+      - run: git diff --exit-code
+
+  check-frontend:
+    name: "🔍 Frontend checks"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .tool-versions
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: make init-frontend
+      - run: make check-frontend
+      - run: git diff --exit-code
+
+  test-backend:
+    name: 🧪 Backend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .tool-versions
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version-file: .tool-versions
+          cache-dependency-glob: backend/uv.lock
+      - run: make init-backend
+      - run: make test-backend
+
+  test-frontend:
+    name: 🧪 Frontend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .tool-versions
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: make init-frontend
+      - run: make test-frontend
+
+  containers:
+    name: 🐋 Containers (${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: production
+            bake-files: compose.yaml
+            compose-files: compose.yaml
+          - mode: development
+            bake-files: compose.yaml,compose.dev.yaml
+            compose-files: compose.yaml:compose.dev.yaml
+    env:
+      COMPOSE_FILE: ${{ matrix.compose-files }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          files: ${{ matrix.bake-files }}
+          load: true
+          set: |
+            backend.tags=voice-agent-backend
+            frontend.tags=voice-agent-frontend
+            backend.cache-from=type=gha,scope=backend-${{ matrix.mode }}
+            backend.cache-to=type=gha,scope=backend-${{ matrix.mode }},mode=max
+            frontend.cache-from=type=gha,scope=frontend-${{ matrix.mode }}
+            frontend.cache-to=type=gha,scope=frontend-${{ matrix.mode }},mode=max
+
+      - if: matrix.mode == 'development'
+        run: mkdir -p backend/.venv frontend/node_modules
+
+      - run: docker compose up --no-build --wait --wait-timeout 120
+
+      - name: Smoke test
+        run: |
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 2 http://127.0.0.1:8080/ | grep -q '<div id="root"></div>'
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 2 http://127.0.0.1:8080/api/health | grep -q '"status":"ok"'
+
+      - if: failure()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down

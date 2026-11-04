@@ -1,0 +1,11 @@
+# Allowlist: only what the dev server and the build need
+*
+!package.json
+!pnpm-lock.yaml
+!index.html
+!vite.config.ts
+!eslint.config.ts
+!postcss.config.cjs
+!tsconfig*.json
+!nginx.conf
+!src/

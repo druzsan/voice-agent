@@ -1,0 +1,17 @@
+name: voice-agent
+
+services:
+  backend:
+    build:
+      context: backend
+      target: runtime
+
+  frontend:
+    build:
+      context: frontend
+      target: runtime
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on:
+      backend:
+        condition: service_healthy
