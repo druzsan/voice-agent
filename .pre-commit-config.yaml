@@ -71,6 +71,11 @@ repos:
         entry: uv --project backend run --frozen check-jsonschema --builtin-schema vendor.compose-spec
         language: system
         files: ^compose(\..+)?\.ya?ml$
+      - id: check-dependabot
+        name: validate Dependabot config
+        entry: uv --project backend run --frozen check-jsonschema --builtin-schema vendor.dependabot
+        language: system
+        files: ^\.github/dependabot\.ya?ml$
 
   # Backend
   - repo: local
