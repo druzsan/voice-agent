@@ -18,9 +18,10 @@ asdf install
 
 ## Install dependencies
 
+Installs the backend and frontend dependencies from the lockfiles and the pre-commit git hook:
+
 ```sh
-uv --directory backend sync
-pnpm --dir frontend install
+make init
 ```
 
 ## Run
@@ -39,20 +40,10 @@ pnpm --dir frontend dev
 
 ## Checks and tests
 
-Backend:
-
 ```sh
-uv --directory backend run ruff format --check .
-uv --directory backend run ruff check .
-uv --directory backend run pyright
-uv --directory backend run pytest
+make check       # format, lint (with fixes) and type-check backend and frontend
+make pre-commit  # run all pre-commit hooks on all files
+make test        # run backend and frontend tests
 ```
 
-Frontend:
-
-```sh
-pnpm --dir frontend format:check
-pnpm --dir frontend lint
-pnpm --dir frontend typecheck
-pnpm --dir frontend test
-```
+Run `make` to list all targets.
