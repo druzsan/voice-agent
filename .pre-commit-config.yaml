@@ -1,0 +1,119 @@
+# See https://pre-commit.com for more information
+# Local hooks use the tools from backend/.venv and frontend/node_modules, so their
+# versions come from uv.lock and pnpm-lock.yaml. Install with:
+#   uv --project backend run pre-commit install
+default_install_hook_types: [pre-commit]
+
+repos:
+  # Generic checks (pre-commit-hooks and check-jsonschema from the backend dev group)
+  - repo: local
+    hooks:
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+        entry: uv --project backend run --frozen trailing-whitespace-fixer
+        language: system
+        types: [text]
+      - id: end-of-file-fixer
+        name: fix end of files
+        entry: uv --project backend run --frozen end-of-file-fixer
+        language: system
+        types: [text]
+      - id: mixed-line-ending
+        name: mixed line ending
+        entry: uv --project backend run --frozen mixed-line-ending
+        language: system
+        types: [text]
+      - id: check-yaml
+        name: check yaml
+        entry: uv --project backend run --frozen check-yaml
+        language: system
+        types: [yaml]
+      - id: check-toml
+        name: check toml
+        entry: uv --project backend run --frozen check-toml
+        language: system
+        types: [toml]
+      - id: check-json
+        name: check json
+        entry: uv --project backend run --frozen check-json
+        language: system
+        types: [json]
+        # tsconfig files are JSONC (TypeScript allows comments there)
+        exclude: ^frontend/tsconfig(\..+)?\.json$
+      - id: check-merge-conflict
+        name: check for merge conflicts
+        entry: uv --project backend run --frozen check-merge-conflict
+        language: system
+        types: [text]
+      - id: check-added-large-files
+        name: check for added large files
+        entry: uv --project backend run --frozen check-added-large-files
+        language: system
+        # Lockfiles grow with the dependencies, the size limit is meant for other files
+        exclude: ^(backend/uv\.lock|frontend/pnpm-lock\.yaml)$
+      - id: check-executables-have-shebangs
+        name: check that executables have shebangs
+        entry: uv --project backend run --frozen check-executables-have-shebangs
+        language: system
+        types: [text, executable]
+      - id: detect-private-key
+        name: detect private key
+        entry: uv --project backend run --frozen detect-private-key
+        language: system
+        types: [text]
+
+  # Backend
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv --project backend run --frozen ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv --project backend run --frozen ruff format
+        language: system
+        types: [python]
+      - id: pyright
+        name: pyright
+        entry: uv --directory backend run --frozen pyright
+        language: system
+        types: [python]
+        files: ^backend/
+        pass_filenames: false
+      - id: uv-lock-check
+        name: uv lock --check
+        entry: uv --directory backend lock --check
+        language: system
+        files: ^backend/(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
+
+  # Frontend (tools run inside frontend/, the frontend/ prefix is stripped from the paths)
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: bash -c 'cd frontend && pnpm exec eslint --max-warnings 0 --fix --no-warn-ignored "${@#frontend/}"' --
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+        files: ^frontend/
+      - id: prettier
+        name: prettier
+        entry: bash -c 'cd frontend && pnpm exec prettier --write --ignore-unknown "${@#frontend/}"' --
+        language: system
+        types: [text]
+        files: ^frontend/
+      - id: tsc
+        name: tsc
+        entry: bash -c 'cd frontend && pnpm exec tsc -b'
+        language: system
+        types_or: [javascript, jsx, ts, tsx, json]
+        files: ^frontend/
+        pass_filenames: false
+
+  # Secrets (not available from PyPI or npm, so the only remote hook)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
