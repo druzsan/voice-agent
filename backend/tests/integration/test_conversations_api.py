@@ -8,10 +8,13 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserProm
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from tests.fakes import FakeRecognizer, FakeSynthesizer, wav_of_silence
-from voice_agent.llm.prompts import GREETING, LLM_FAILED
+from voice_agent.agent.carrie import build_agent
+from voice_agent.agent.templates import GREETING, template
 from voice_agent.llm.responder import Responder
 from voice_agent.main import create_app
 from voice_agent.services import Services
+
+LLM_FAILED = template("llm_failed", "en")
 
 
 def start(client: TestClient) -> str:
@@ -185,7 +188,9 @@ def test_unknown_conversations_are_not_found(client: TestClient) -> None:
 
 def client_with_model(services: Services, model: FunctionModel) -> TestClient:
     return TestClient(
-        create_app(services=replace(services, responder=Responder(model, 5, 100)))
+        create_app(
+            services=replace(services, responder=Responder(build_agent(model), 5, 100))
+        )
     )
 
 
@@ -249,6 +254,7 @@ def test_the_list_shows_the_newest_conversation_first(client: TestClient) -> Non
 def test_push_to_talk_turns_store_what_their_models_consumed(
     client: TestClient,
 ) -> None:
+
     conversation = client.post("/api/conversations").json()
     greeting = conversation["greeting"]
     assert [u["service"] for u in greeting["usage"]] == ["tts"]
@@ -263,3 +269,39 @@ def test_push_to_talk_turns_store_what_their_models_consumed(
     answer = body["assistant_message"]["usage"]
     assert [u["service"] for u in answer] == ["llm", "tts"]
     assert all(u["duration_ms"] >= 0 for u in answer)
+
+
+def test_feedback_on_a_call_is_stored_and_can_be_changed(client: TestClient) -> None:
+    conversation_id = start(client)
+
+    first = client.put(
+        f"/api/conversations/{conversation_id}/feedback",
+        json={"rating": "down", "comment": "  Too slow.  "},
+    )
+    second = client.put(
+        f"/api/conversations/{conversation_id}/feedback", json={"rating": "up"}
+    )
+    listed = client.get("/api/conversations").json()[0]
+
+    assert first.status_code == 200
+    assert (first.json()["feedback_rating"], first.json()["feedback_comment"]) == (
+        "down",
+        "Too slow.",
+    )
+    assert (listed["feedback_rating"], listed["feedback_comment"]) == ("up", None)
+    assert listed["feedback_at"] is not None
+    assert second.json()["id"] == conversation_id
+
+
+def test_feedback_needs_a_known_call_and_a_rating(client: TestClient) -> None:
+    unknown = client.put(
+        "/api/conversations/01a1abe9-c983-7fcf-820e-1f2f8c65a057/feedback",
+        json={"rating": "up"},
+    )
+    conversation_id = start(client)
+    invalid = client.put(
+        f"/api/conversations/{conversation_id}/feedback", json={"rating": "meh"}
+    )
+
+    assert unknown.status_code == 404
+    assert invalid.status_code == 422

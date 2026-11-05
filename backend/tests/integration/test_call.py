@@ -22,11 +22,14 @@ from tests.fakes import (
     InMemoryConversationRepository,
     pcm,
 )
+from voice_agent.agent.carrie import build_agent
+from voice_agent.agent.templates import GREETING, template
 from voice_agent.config import Settings
-from voice_agent.llm.prompts import GREETING, LLM_FAILED
 from voice_agent.llm.responder import Responder
 from voice_agent.main import create_app
 from voice_agent.services import Services
+
+LLM_FAILED = template("llm_failed", "en")
 
 Received = dict[str, Any]
 
@@ -148,9 +151,9 @@ def test_a_typed_message_is_answered_as_it_streams(
 
     user = next(m for m in turn if m["type"] == "user_message")
     assert user["text"] == "Hello there" and user["source"] == "keypad"
+    # Shown sentence by sentence, each once it has passed the reply check
     deltas = [m["text"] for m in turn if m["type"] == "assistant_delta"]
-    assert len(deltas) > 1
-    assert "".join(deltas).strip() == "You said: Hello there"
+    assert deltas == ["You said: Hello there"]
     states = [m["state"] for m in turn if m["type"] == "state"]
     assert states == ["thinking", "speaking", "listening"]
     final = next(m for m in turn if m["type"] == "assistant_message")
@@ -246,7 +249,9 @@ def test_disconnecting_mid_reply_stores_what_was_said(
     services: Services, repository: InMemoryConversationRepository
 ) -> None:
     model, release = slow_story()
-    app = create_app(services=replace(services, responder=Responder(model, 5, 100)))
+    app = create_app(
+        services=replace(services, responder=Responder(build_agent(model), 5, 100))
+    )
     with TestClient(app) as client:
         with client.websocket_connect("/api/call") as ws:
             caller = Caller(ws)
@@ -275,7 +280,9 @@ def test_a_model_failing_midway_keeps_the_spoken_part(
         raise RuntimeError("provider down")
 
     model = FunctionModel(stream_function=stream)
-    app = create_app(services=replace(services, responder=Responder(model, 5, 100)))
+    app = create_app(
+        services=replace(services, responder=Responder(build_agent(model), 5, 100))
+    )
     with TestClient(app) as client, client.websocket_connect("/api/call") as ws:
         caller = Caller(ws)
         caller.until("state", state="listening")
@@ -311,7 +318,9 @@ def test_the_next_prompt_says_what_the_caller_heard(
         yield "First sentence. Second sentence. Third sentence."
 
     model = FunctionModel(stream_function=stream)
-    app = create_app(services=replace(services, responder=Responder(model, 5, 100)))
+    app = create_app(
+        services=replace(services, responder=Responder(build_agent(model), 5, 100))
+    )
     with TestClient(app) as client, client.websocket_connect("/api/call") as ws:
         caller = Caller(ws)
         caller.until("state", state="listening")
@@ -324,8 +333,7 @@ def test_the_next_prompt_says_what_the_caller_heard(
         caller.until("turn_done")
 
     assert prompts[1] == [
-        "(You were interrupted. The caller heard only: 'First sentence.')",
-        "Sorry, go on",
+        "(You were interrupted. The caller heard only: 'First sentence.')\nSorry, go on"
     ]
 
 
@@ -443,7 +451,9 @@ def test_messages_during_a_turn_are_answered_after_it(
     services: Services, repository: InMemoryConversationRepository
 ) -> None:
     model, release = slow_story()
-    app = create_app(services=replace(services, responder=Responder(model, 5, 100)))
+    app = create_app(
+        services=replace(services, responder=Responder(build_agent(model), 5, 100))
+    )
     with TestClient(app) as client, client.websocket_connect("/api/call") as ws:
         caller = Caller(ws)
         caller.until("state", state="listening")
@@ -548,7 +558,9 @@ def test_utterances_answered_together_join_their_live_transcripts(
     live.session.texts = ["My car is late.", "And it's red."]
     app = create_app(
         services=replace(
-            services, responder=Responder(model, 5, 100), live_recognizer=live
+            services,
+            responder=Responder(build_agent(model), 5, 100),
+            live_recognizer=live,
         )
     )
     with TestClient(app) as client, client.websocket_connect("/api/call") as ws:
@@ -596,6 +608,7 @@ def test_the_greeting_reports_its_synthesis(connect: Callable[..., Any]) -> None
 def test_recognizing_noise_is_reported_outside_a_turn(
     caller: Caller, recognizer: FakeRecognizer
 ) -> None:
+
     recognizer.text = ""
     caller.speak(1)
 

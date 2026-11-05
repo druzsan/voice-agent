@@ -5,11 +5,15 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from anyio import to_thread
 from fastapi import Depends, Request
 from openai import AsyncOpenAI
 
+from voice_agent.agent.carrie import build_agent
+from voice_agent.agent.deps import CarrieSettings
+from voice_agent.agent.language import supported_languages
 from voice_agent.config import Settings
 from voice_agent.conversation.call_session import (
     CallSession,
@@ -19,6 +23,8 @@ from voice_agent.conversation.call_session import (
 from voice_agent.conversation.records import CallSetup
 from voice_agent.conversation.repository import ConversationRepository
 from voice_agent.conversation.turns import TurnService
+from voice_agent.crm.port import Crm
+from voice_agent.crm.sql import SqlCrm
 from voice_agent.db.repository import SqlConversationRepository, create_engine
 from voice_agent.llm.providers import build_model, llm_price, model_name
 from voice_agent.llm.responder import LlmPrice, Responder
@@ -57,8 +63,13 @@ class Services:
     synthesizer: SpeechSynthesizer
     responder: Responder
     vad: VoiceActivityDetector
+    crm: Crm
     # Recognizes live calls while the caller speaks; None: after each utterance
     live_recognizer: LiveRecognizer | None = None
+
+    @property
+    def carrie(self) -> CarrieSettings:
+        return carrie_settings(self.settings)
 
     def _setup(self, *, live: bool = False) -> CallSetup:
         settings = self.settings
@@ -79,13 +90,20 @@ class Services:
             setup=self._setup(),
             history_messages=self.settings.llm_history_messages,
             max_recording_s=self.settings.max_recording_s,
+            crm=self.crm,
+            carrie=self.carrie,
         )
 
-    def call(self, transport: CallTransport) -> CallSession:
-        """A live call over `transport`."""
+    def call(
+        self, transport: CallTransport, caller_phone: str | None = None
+    ) -> CallSession:
+        """A live call over `transport` from `caller_phone`."""
         settings = self.settings
         return CallSession(
             transport=transport,
+            crm=self.crm,
+            carrie=self.carrie,
+            caller_phone=caller_phone,
             repository=self.repository,
             recognizer=self.recognizer,
             live_recognizer=self.live_recognizer,
@@ -107,9 +125,18 @@ class Services:
         )
 
 
+def carrie_settings(settings: Settings) -> CarrieSettings:
+    return CarrieSettings(
+        supported_languages=supported_languages(settings),
+        unavailable_routes=settings.unavailable_route_set,
+        timezone=ZoneInfo(settings.timezone),
+    )
+
+
 def build_responder(settings: Settings, price: LlmPrice | None = None) -> Responder:
+    model = build_model(settings)
     return Responder(
-        build_model(settings),
+        build_agent(model) if model is not None else None,
         settings.llm_timeout_s,
         settings.llm_max_tokens,
         name=model_name(settings),
@@ -135,6 +162,7 @@ async def production_services(settings: Settings) -> AsyncGenerator[Services]:
         services = Services(
             settings=settings,
             repository=SqlConversationRepository(engine),
+            crm=SqlCrm(engine),
             recognizer=recognizer,
             live_recognizer=live_recognizer,
             synthesizer=_build_synthesizer(settings, openai),

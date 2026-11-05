@@ -13,7 +13,13 @@ function run(...actions: CallAction[]): CallState {
 
 const connected: CallAction[] = [
   { type: 'dial' },
-  received({ type: 'call_started', conversation_id: 'c1' }),
+  received({
+    type: 'call_started',
+    conversation_id: 'c1',
+    caller_phone: '+4915112345678',
+    language: 'en',
+    supported_languages: ['en', 'de'],
+  }),
   received({ type: 'state', state: 'listening' }),
 ]
 
@@ -47,7 +53,11 @@ describe('callReducer', () => {
 
     expect(streaming.draft).toEqual({ turn: 2, text: 'Hello there.' })
     expect(stored.draft).toBeNull()
-    expect(stored.messages.map((m) => [m.role, m.text, m.interrupted])).toEqual([
+    expect(
+      stored.messages.flatMap((m) =>
+        m.kind === 'message' ? [[m.role, m.text, m.interrupted]] : [],
+      ),
+    ).toEqual([
       ['user', 'Hi', false],
       ['assistant', 'Hello there.', true],
     ])
@@ -109,5 +119,41 @@ describe('callReducer', () => {
     const state = run(...connected, { type: 'hungUp', at: 5000 }, { type: 'dial' })
 
     expect(state).toEqual({ ...initialCallState, phase: 'connecting' })
+  })
+})
+
+describe('callReducer with Carrie', () => {
+  it('keeps who calls and in which language', () => {
+    const state = run(...connected, received({ type: 'language', language: 'de' }))
+
+    expect(state.callerPhone).toBe('+4915112345678')
+    expect(state.supportedLanguages).toEqual(['en', 'de'])
+    expect(state.language).toBe('de')
+  })
+
+  it('lists tool calls between the messages', () => {
+    const state = run(
+      ...connected,
+      received({ type: 'user_message', id: 2, text: 'My ticket?', source: 'voice' }),
+      received({
+        type: 'tool',
+        turn: 2,
+        name: 'find_open_tickets',
+        status: 'refused',
+        label: 'No ticket for these details (1 of 2)',
+        data: {},
+      }),
+    )
+
+    expect(state.messages.map((m) => m.kind)).toEqual(['message', 'tool'])
+    expect(state.messages[1]).toMatchObject({ status: 'refused', name: 'find_open_tickets' })
+  })
+
+  it('is still in the call while on hold', () => {
+    const onHold = run(...connected, received({ type: 'state', state: 'on_hold' }))
+    const later = callReducer(onHold, received({ type: 'state', state: 'speaking' }))
+
+    expect(onHold.phase).toBe('on_hold')
+    expect(later.phase).toBe('speaking')
   })
 })

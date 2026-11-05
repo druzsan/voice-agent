@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -7,18 +8,29 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models import Model
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.usage import RunUsage
 
+from tests.fakes import call_deps
+from voice_agent.agent.carrie import build_agent
+from voice_agent.agent.templates import template
 from voice_agent.config import LlmProvider, Settings
 from voice_agent.conversation.records import Message, Role, Source
-from voice_agent.llm.prompts import LLM_NOT_CONFIGURED
 from voice_agent.llm.providers import build_model, echo_model, llm_price
-from voice_agent.llm.responder import Responder, StreamedReply, to_model_history
+from voice_agent.llm.responder import (
+    Responder,
+    StreamedReply,
+    dump_messages,
+    to_model_history,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -82,9 +94,11 @@ def test_without_model_or_key_the_model_is_not_configured(configured: Settings) 
 
 
 async def test_an_unconfigured_model_gets_a_fixed_reply() -> None:
-    reply = await Responder(None, timeout_s=1, max_tokens=10).reply([], "Hi")
+    reply = await Responder(None, timeout_s=1, max_tokens=10).reply(
+        [], "Hi", call_deps()
+    )
 
-    assert reply.text == LLM_NOT_CONFIGURED
+    assert reply.text == template("not_configured", "en")
     assert reply.source == "template"
 
 
@@ -94,6 +108,7 @@ def message(
     text: str,
     interrupted: bool = False,
     heard_text: str | None = None,
+    model_messages: list[dict[str, Any]] | None = None,
 ) -> Message:
     return Message(
         id=1,
@@ -104,21 +119,29 @@ def message(
         text=text,
         interrupted=interrupted,
         heard_text=heard_text,
+        model_messages=model_messages,
     )
 
 
-def test_history_leaves_out_fixed_texts() -> None:
-    history = to_model_history(
+def test_history_leaves_out_the_greeting() -> None:
+    history, note = to_model_history(
         [
             message("assistant", "template", "Hello, how can I help?"),
             message("user", "voice", "Hi"),
             message("assistant", "llm", "Hello!"),
             message("user", "keypad", "123"),
-            message("assistant", "template", "Sorry, please try again."),
+            # Fixed texts after the greeting (safety guidance) are kept
+            message("assistant", "template", "Please move away from the vehicle."),
         ]
     )
 
-    assert [type(m) for m in history] == [ModelRequest, ModelResponse, ModelRequest]
+    assert [type(m) for m in history] == [
+        ModelRequest,
+        ModelResponse,
+        ModelRequest,
+        ModelResponse,
+    ]
+    assert note is None
 
 
 def prompts(history: list[ModelMessage]) -> list[list[str]]:
@@ -134,7 +157,7 @@ def prompts(history: list[ModelMessage]) -> list[list[str]]:
 
 
 def test_after_an_interrupted_reply_the_model_learns_what_was_heard() -> None:
-    history = to_model_history(
+    history, note = to_model_history(
         [
             message("user", "voice", "Tell me a story"),
             message(
@@ -144,17 +167,67 @@ def test_after_an_interrupted_reply_the_model_learns_what_was_heard() -> None:
                 interrupted=True,
                 heard_text="Once upon a time.",
             ),
-        ],
-        "Wait, a short one",
+        ]
     )
 
-    assert prompts(history) == [
-        ["Tell me a story"],
+    assert prompts(history) == [["Tell me a story"]]
+    assert note == "(You were interrupted. The caller heard only: 'Once upon a time.')"
+
+
+def tool_turn(text_before: str = "One moment.") -> list[dict[str, Any]]:
+    """A turn's stored messages: text, a tool call, its result, the answer."""
+    stored = dump_messages(
         [
-            "(You were interrupted. The caller heard only: 'Once upon a time.')",
-            "Wait, a short one",
-        ],
-    ]
+            ModelResponse(
+                parts=[
+                    TextPart(text_before),
+                    ToolCallPart("lookup_order", {"order_number": "1"}, "call-1"),
+                ]
+            ),
+            ModelRequest(
+                parts=[ToolReturnPart("lookup_order", {"status": "ok"}, "call-1")]
+            ),
+            ModelResponse(parts=[TextPart("It's confirmed.")]),
+        ]
+    )
+    assert stored is not None
+    return stored
+
+
+def test_tool_calls_are_replayed_with_the_text_the_caller_heard() -> None:
+    history, _ = to_model_history(
+        [
+            message("user", "voice", "When is my car coming?"),
+            message(
+                "assistant",
+                "llm",
+                "One moment. It's confirmed.",
+                model_messages=tool_turn(),
+            ),
+        ]
+    )
+
+    request, call, result, answer = history
+    assert isinstance(request, ModelRequest)
+    assert isinstance(call, ModelResponse)
+    assert [type(p) for p in call.parts] == [ToolCallPart]
+    assert isinstance(result, ModelRequest)
+    assert [type(p) for p in result.parts] == [ToolReturnPart]
+    assert isinstance(answer, ModelResponse)
+    assert answer.parts == [TextPart("One moment. It's confirmed.")]
+
+
+def test_a_tool_call_without_its_result_is_dropped() -> None:
+    # The turn was cancelled while the tool ran
+    stored = dump_messages(
+        [
+            ModelResponse(
+                parts=[TextPart("One moment."), ToolCallPart("lookup_order", {}, "c-1")]
+            ),
+        ]
+    )
+
+    assert stored is None
 
 
 async def collect(responder: Responder) -> tuple[list[str], StreamedReply]:
@@ -163,12 +236,16 @@ async def collect(responder: Responder) -> tuple[list[str], StreamedReply]:
     async def on_text(delta: str) -> None:
         deltas.append(delta)
 
-    reply = await responder.stream([], "Hi there", on_text)
+    reply = await responder.stream([], "Hi there", call_deps(), on_text)
     return deltas, reply
 
 
+def agent(model: Model) -> Responder:
+    return Responder(build_agent(model), timeout_s=5, max_tokens=100)
+
+
 async def test_a_streamed_reply_arrives_piece_by_piece() -> None:
-    deltas, reply = await collect(Responder(echo_model(), timeout_s=1, max_tokens=10))
+    deltas, reply = await collect(agent(echo_model()))
 
     assert deltas == ["You ", "said: ", "Hi ", "there "]
     assert (reply.text, reply.source, reply.failed) == (
@@ -187,7 +264,7 @@ async def test_a_stream_that_breaks_keeps_its_beginning() -> None:
         yield "Well, "
         raise RuntimeError("provider down")
 
-    _, reply = await collect(Responder(FunctionModel(stream_function=breaking), 1, 10))
+    _, reply = await collect(agent(FunctionModel(stream_function=breaking)))
 
     assert (reply.text, reply.failed) == ("Well,", True)
 
@@ -195,13 +272,13 @@ async def test_a_stream_that_breaks_keeps_its_beginning() -> None:
 async def test_an_unconfigured_model_streams_a_fixed_reply() -> None:
     deltas, reply = await collect(Responder(None, timeout_s=1, max_tokens=10))
 
-    assert deltas == [LLM_NOT_CONFIGURED]
+    assert deltas == [template("not_configured", "en")]
     assert reply.source == "template"
 
 
 async def test_a_run_is_metered_with_its_price() -> None:
     responder = Responder(
-        echo_model(),
+        build_agent(echo_model()),
         timeout_s=5,
         max_tokens=100,
         name="echo",
@@ -211,7 +288,7 @@ async def test_a_run_is_metered_with_its_price() -> None:
     async def ignore(delta: str) -> None:
         pass
 
-    reply = await responder.stream([], "Hi", ignore)
+    reply = await responder.stream([], "Hi", call_deps(), ignore)
 
     metered = reply.metered
     assert metered is not None

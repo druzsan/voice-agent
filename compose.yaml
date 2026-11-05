@@ -16,13 +16,14 @@ services:
       timeout: 3s
       retries: 15
 
-  # One-shot: migrates the database with the backend image, then exits
+  # One-shot: migrates the database with the backend image and loads the
+  # customer care system's starting data into an empty system, then exits
   migrate:
     # The same build as the backend, so both share one image build
     build:
       context: backend
       target: runtime
-    command: [alembic, upgrade, head]
+    command: [sh, -c, "alembic upgrade head && python -m voice_agent.crm.seed"]
     env_file:
       - path: .env
         required: false

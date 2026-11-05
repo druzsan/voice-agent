@@ -16,6 +16,7 @@ from voice_agent.conversation.protocol import (
     ClientEvent,
     ServerMessage,
 )
+from voice_agent.crm.matching import normalize_phone
 from voice_agent.services import Services
 
 logger = logging.getLogger(__name__)
@@ -93,7 +94,8 @@ def _same_origin(websocket: WebSocket) -> bool:
 
 
 @router.websocket("/call")
-async def call(websocket: WebSocket) -> None:
+async def call(websocket: WebSocket, phone: str | None = None) -> None:
+    """A live call; `phone` is the caller's number as the line reports it."""
     if not _same_origin(websocket):
         logger.warning("Refused a call from %s", websocket.headers.get("origin"))
         # Before accepting, this answers the handshake with 403
@@ -102,7 +104,7 @@ async def call(websocket: WebSocket) -> None:
     services: Services = websocket.app.state.services
     await websocket.accept()
     transport = WebSocketTransport(websocket)
-    session = services.call(transport)
+    session = services.call(transport, normalize_phone(phone) if phone else None)
     try:
         await session.start()
     except Exception:

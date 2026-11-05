@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select, text, update
@@ -10,6 +12,7 @@ from voice_agent.conversation.records import (
     ConversationDetail,
     ConversationSummary,
     EndReason,
+    FeedbackRating,
     Message,
     NewMessage,
 )
@@ -46,9 +49,11 @@ class SqlConversationRepository:
             return False
         return True
 
-    async def create_conversation(self, setup: CallSetup) -> Conversation:
+    async def create_conversation(
+        self, setup: CallSetup, caller_phone: str | None = None
+    ) -> Conversation:
         async with self._sessions.begin() as session:
-            row = ConversationRow(**setup.model_dump())
+            row = ConversationRow(**setup.model_dump(), caller_phone=caller_phone)
             session.add(row)
             await session.flush()
             await session.refresh(row)
@@ -70,6 +75,40 @@ class SqlConversationRepository:
                 )
                 .values(ended_at=func.now(), end_reason=reason)
             )
+
+    async def get_state(self, conversation_id: UUID) -> dict[str, Any] | None:
+        async with self._sessions() as session:
+            return await session.scalar(
+                select(ConversationRow.state).where(
+                    ConversationRow.id == conversation_id
+                )
+            )
+
+    async def save_state(
+        self, conversation_id: UUID, state: dict[str, Any], language: str
+    ) -> None:
+        async with self._sessions.begin() as session:
+            await session.execute(
+                update(ConversationRow)
+                .where(ConversationRow.id == conversation_id)
+                .values(state=state, language=language)
+            )
+
+    async def save_feedback(
+        self,
+        conversation_id: UUID,
+        rating: FeedbackRating,
+        comment: str | None,
+    ) -> Conversation | None:
+        async with self._sessions.begin() as session:
+            row = await session.get(ConversationRow, conversation_id)
+            if row is None:
+                return None
+            row.feedback_rating = rating
+            row.feedback_comment = comment
+            row.feedback_at = datetime.now(UTC)
+            await session.flush()
+            return _conversation(row)
 
     async def add_message(self, conversation_id: UUID, message: NewMessage) -> Message:
         async with self._sessions.begin() as session:

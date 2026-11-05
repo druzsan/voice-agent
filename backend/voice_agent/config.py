@@ -81,8 +81,15 @@ class Settings(BaseSettings):
     # Upper bound for one answer; reasoning models count their hidden reasoning
     # too, so this leaves room even though spoken answers are short
     llm_max_tokens: int = Field(default=1024, gt=0)
-    # Earlier messages sent to the model as conversation history
-    llm_history_messages: int = Field(default=20, ge=0)
+    # Earlier messages sent to the model as conversation history; the call
+    # state block carries the verified facts beyond it
+    llm_history_messages: int = Field(default=40, ge=0)
+
+    # Customer care: handover routes that report "no colleague available",
+    # comma-separated (e.g. roadside_assistance,language_support)
+    unavailable_routes: str = ""
+    # Dates and times Carrie works with
+    timezone: str = "Europe/Berlin"
 
     # local: faster-whisper and Piper on the CPU, audio stays on this machine;
     # openai: OpenAI's speech models (needs OPENAI_API_KEY with API credit)
@@ -155,3 +162,11 @@ class Settings(BaseSettings):
         if self.tts_provider == "local":
             return self.tts_voice
         return f"openai/{self.openai_tts_model}/{self.openai_tts_voice}"
+
+    @property
+    def unavailable_route_set(self) -> frozenset[str]:
+        return frozenset(
+            route.strip()
+            for route in self.unavailable_routes.split(",")
+            if route.strip()
+        )

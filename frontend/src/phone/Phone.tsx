@@ -1,7 +1,9 @@
 import {
   ActionIcon,
   Alert,
+  Badge,
   Box,
+  Button,
   Center,
   Group,
   Stack,
@@ -18,9 +20,13 @@ import { type CallState, isInCall, type Phase } from './callState.ts'
 import { HangUpIcon, KeypadIcon, MicIcon, MicOffIcon, PhoneIcon, SendIcon } from './icons.tsx'
 import { Keypad } from './Keypad.tsx'
 import classes from './Phone.module.css'
+import { Feedback } from './Feedback.tsx'
+import { describeStoredCall, toTranscript } from './history.ts'
+import { isGermanPhone, randomPhone } from './phoneNumber.ts'
 import { StatsPanel } from './StatsPanel.tsx'
 import { Transcript } from './Transcript.tsx'
 import { useCall } from './useCall.ts'
+import { useHistory } from './useHistory.ts'
 
 function clock(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000))
@@ -33,11 +39,12 @@ const PHASE_LABELS: Record<Phase, string> = {
   listening: 'Listening…',
   thinking: 'Thinking…',
   speaking: 'Speaking… talk to interrupt',
+  on_hold: 'On hold',
   ended: 'Call ended',
 }
 
 function describeCall({ phase, muted, callerSpeaking, microphone }: CallState): string {
-  if (!isInCall(phase)) {
+  if (!isInCall(phase) || phase === 'on_hold') {
     return PHASE_LABELS[phase]
   }
   if (microphone === 'unavailable') {
@@ -52,6 +59,8 @@ function describeCall({ phase, muted, callerSpeaking, microphone }: CallState): 
   }
   return callerSpeaking ? 'Hearing you…' : PHASE_LABELS[phase]
 }
+
+const LANGUAGE_NAMES: Record<string, string> = { en: 'English', de: 'German' }
 
 function describeModel(status: Status | null): string {
   if (status === null) {
@@ -107,9 +116,58 @@ export function Phone() {
   // Keypad input is stored as such, unless the caller also typed
   const [composerVia, setComposerVia] = useState<InputVia>('keyboard')
   const [keypadOpen, setKeypadOpen] = useState(false)
+  // The number the next call comes from: new for every call, unless the
+  // caller typed their own
+  const [phone, setPhone] = useState(randomPhone)
+  const [phoneTyped, setPhoneTyped] = useState(false)
+  const phoneValid = isGermanPhone(phone)
 
   const inCall = isInCall(phase)
   const now = useNow(inCall)
+  // Earlier calls can be looked at while no call runs
+  const history = useHistory(call.state.conversationId)
+  const browsing = history.index !== null
+  const canBrowse = !inCall && phase !== 'connecting'
+
+  function dial() {
+    call.start(phone.trim())
+    // The next call comes from a new number, unless the caller typed theirs
+    if (!phoneTyped) {
+      setPhone(randomPhone())
+    }
+  }
+
+  const numberField = (
+    <Group gap={4} wrap="nowrap" justify="center">
+      <TextInput
+        className={classes['number']}
+        size="xs"
+        radius="xl"
+        label="Calling from"
+        aria-label="Your phone number"
+        value={phone}
+        error={phoneValid ? undefined : 'A German number, e.g. +49 151 12345678'}
+        onChange={(event) => {
+          setPhone(event.currentTarget.value)
+          setPhoneTyped(true)
+        }}
+      />
+      <Tooltip label="New random number">
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          mt={20}
+          aria-label="New random number"
+          onClick={() => {
+            setPhone(randomPhone())
+            setPhoneTyped(false)
+          }}
+        >
+          ↻
+        </ActionIcon>
+      </Tooltip>
+    </Group>
+  )
 
   // Typing works at any time; the backend answers in order
   function send(text = composer, via = composerVia) {
@@ -143,15 +201,102 @@ export function Phone() {
     <Box className={classes['page']}>
       <Box className={classes['phone']}>
         <Box className={classes['header']}>
-          <Title order={2} fz="lg">
-            Voice Agent
-          </Title>
-          <Text fz="xs" c="dimmed">
-            {showsCall ? `${duration} · ${statusLine}` : describeModel(status)}
-          </Text>
+          <Group justify="space-between" wrap="nowrap" gap={4}>
+            <Tooltip label="Previous call">
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                aria-label="Previous call"
+                className={canBrowse ? undefined : classes['hidden']}
+                disabled={!canBrowse || !history.hasOlder || history.loading}
+                onClick={history.older}
+              >
+                ‹
+              </ActionIcon>
+            </Tooltip>
+            <Title order={2} fz="lg">
+              Carrie · Customer Care
+            </Title>
+            <Tooltip label={history.index === 0 ? 'Back to phone' : 'Next call'}>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                aria-label="Next call"
+                className={canBrowse ? undefined : classes['hidden']}
+                disabled={!canBrowse || !browsing}
+                onClick={history.newer}
+              >
+                ›
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+          {browsing ? (
+            <>
+              <Group gap={6} justify="center">
+                <Text fz="xs" c="dimmed">
+                  Previous call {(history.index ?? 0) + 1} of {history.calls.length}
+                  {history.detail && ` · ${describeStoredCall(history.detail)}`}
+                </Text>
+                {history.detail?.language && (
+                  <Badge size="xs" variant="light" aria-label="Conversation language">
+                    {history.detail.language.toUpperCase()}
+                  </Badge>
+                )}
+              </Group>
+              {history.detail?.caller_phone && (
+                <Text fz={10} c="dimmed">
+                  from {history.detail.caller_phone}
+                </Text>
+              )}
+            </>
+          ) : (
+            <>
+              <Group gap={6} justify="center">
+                <Text fz="xs" c="dimmed">
+                  {showsCall ? `${duration} · ${statusLine}` : describeModel(status)}
+                </Text>
+                {showsCall && (
+                  <Badge size="xs" variant="light" aria-label="Conversation language">
+                    {call.state.language.toUpperCase()}
+                  </Badge>
+                )}
+              </Group>
+              {showsCall && call.state.callerPhone && (
+                <Text fz={10} c="dimmed">
+                  from {call.state.callerPhone}
+                </Text>
+              )}
+            </>
+          )}
         </Box>
 
-        {!showsCall ? (
+        {browsing ? (
+          <>
+            <Transcript
+              messages={history.detail ? toTranscript(history.detail) : []}
+              draft={null}
+              waiting={history.loading}
+            />
+            <Stack gap="sm" className={classes['footer']}>
+              {history.notice && (
+                <Text fz="sm" c="orange" ta="center" role="status">
+                  {history.notice}
+                </Text>
+              )}
+              {history.detail && (
+                <Feedback
+                  key={history.detail.id}
+                  conversationId={history.detail.id}
+                  rating={history.detail.feedback_rating}
+                  comment={history.detail.feedback_comment}
+                />
+              )}
+              <Button variant="light" radius="xl" onClick={history.close}>
+                Back to phone
+              </Button>
+            </Stack>
+          </>
+        ) : !showsCall ? (
           <Center flex={1}>
             <Stack align="center" gap="md" px="lg">
               <ActionIcon
@@ -161,14 +306,26 @@ export function Phone() {
                 variant="filled"
                 aria-label="Start call"
                 loading={phase === 'connecting'}
-                disabled={unreachable}
-                onClick={call.start}
+                disabled={unreachable || !phoneValid}
+                onClick={dial}
               >
                 <PhoneIcon size={38} />
               </ActionIcon>
               <Text fz="sm" c="dimmed" ta="center">
-                {phase === 'connecting' ? PHASE_LABELS.connecting : 'Tap to call'}
+                {phase === 'connecting' ? PHASE_LABELS.connecting : 'Tap to call customer care'}
               </Text>
+              {numberField}
+              {history.notice && (
+                <Text fz="xs" c="dimmed" role="status">
+                  {history.notice}
+                </Text>
+              )}
+              {status && (
+                <Text fz={11} c="dimmed" ta="center">
+                  Carrie speaks{' '}
+                  {status.languages.map((code) => LANGUAGE_NAMES[code] ?? code).join(' and ')}
+                </Text>
+              )}
               {unreachable && (
                 <Alert color="red" variant="light">
                   The backend is not reachable. Is it running?
@@ -194,14 +351,41 @@ export function Phone() {
           />
         )}
 
-        {showsCall && (
+        {showsCall && !browsing && (
           <Stack gap="sm" className={classes['footer']}>
-            {notice && (
+            {(notice ?? history.notice) && (
               <Text fz="sm" c="orange" ta="center" role="status">
-                {notice}
+                {notice ?? history.notice}
               </Text>
             )}
-            {inCall && (
+            {phase === 'on_hold' && (
+              <Stack gap="sm" align="center">
+                <Text fz="sm" ta="center" c="dimmed">
+                  You&apos;ve been transferred to a colleague and are on hold.
+                </Text>
+                <Button
+                  color="yellow"
+                  radius="xl"
+                  size="lg"
+                  fullWidth
+                  aria-label="On hold, continue talking"
+                  onClick={call.resume}
+                >
+                  On hold · tap to continue
+                </Button>
+                <ActionIcon
+                  size={56}
+                  radius="100%"
+                  variant="filled"
+                  color="red"
+                  aria-label="Hang up"
+                  onClick={call.hangUp}
+                >
+                  <HangUpIcon />
+                </ActionIcon>
+              </Stack>
+            )}
+            {inCall && phase !== 'on_hold' && (
               <>
                 <Group gap="xs" wrap="nowrap">
                   <TextInput
@@ -282,18 +466,26 @@ export function Phone() {
               </>
             )}
             {phase === 'ended' && (
-              <Group justify="center">
+              <Stack gap="xs" align="center">
+                {call.state.conversationId && (
+                  <Feedback
+                    key={call.state.conversationId}
+                    conversationId={call.state.conversationId}
+                  />
+                )}
+                {numberField}
                 <ActionIcon
                   size={64}
                   radius="100%"
                   color="green"
                   variant="filled"
                   aria-label="Call again"
-                  onClick={call.start}
+                  disabled={!phoneValid}
+                  onClick={dial}
                 >
                   <PhoneIcon size={30} />
                 </ActionIcon>
-              </Group>
+              </Stack>
             )}
           </Stack>
         )}

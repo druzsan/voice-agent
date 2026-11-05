@@ -4,7 +4,8 @@
 
 import type { EndReason, InputVia, Source } from './conversations.ts'
 
-export type CallState = 'listening' | 'thinking' | 'speaking'
+// on_hold: transferred to a colleague; the call waits until the caller resumes
+export type CallState = 'listening' | 'thinking' | 'speaking' | 'on_hold'
 
 // Browser to server
 export type ClientMessage =
@@ -13,11 +14,16 @@ export type ClientMessage =
   | { type: 'played'; clip: number }
   | { type: 'mute'; muted: boolean }
   | { type: 'hangup' }
+  // Picks the call up again after being on hold
+  | { type: 'resume' }
 
 // Server to browser
 export interface CallStarted {
   type: 'call_started'
   conversation_id: string
+  caller_phone: string | null
+  language: string
+  supported_languages: string[]
 }
 
 export interface StateChanged {
@@ -106,9 +112,25 @@ export interface UsageReport {
   usage: Usage[]
 }
 
+// Carrie used a tool: looked something up or changed it
+export interface ToolActivity {
+  type: 'tool'
+  turn: number
+  name: string
+  status: 'ok' | 'refused' | 'failed'
+  label: string
+  data: Record<string, unknown>
+}
+
+// The conversation continues in another language
+export interface LanguageChanged {
+  type: 'language'
+  language: string
+}
+
 export interface CallError {
   type: 'error'
-  code: 'invalid_message' | 'stt_failed' | 'busy'
+  code: 'invalid_message' | 'stt_failed' | 'busy' | 'on_hold'
   message: string
 }
 
@@ -128,6 +150,8 @@ export type ServerMessage =
   | AssistantMessage
   | Interrupted
   | TurnDone
+  | ToolActivity
+  | LanguageChanged
   | UsageReport
   | CallError
   | CallEnded
@@ -143,6 +167,8 @@ const SERVER_MESSAGE_TYPES: ReadonlySet<string> = new Set<ServerMessage['type']>
   'assistant_message',
   'interrupted',
   'turn_done',
+  'tool',
+  'language',
   'usage',
   'error',
   'call_ended',
@@ -169,7 +195,9 @@ export function parseServerMessage(data: string): ServerMessage | null {
   return null
 }
 
-export function callUrl(location: Location = window.location): string {
+// `phone`: the caller's number, as the phone line would report it
+export function callUrl(phone?: string, location: Location = window.location): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${location.host}/api/call`
+  const query = phone ? `?phone=${encodeURIComponent(phone)}` : ''
+  return `${protocol}//${location.host}/api/call${query}`
 }

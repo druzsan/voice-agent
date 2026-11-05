@@ -8,7 +8,9 @@ from sqlalchemy.pool import NullPool
 
 from voice_agent.config import Settings
 
-# The models module defines the tables on Base's metadata
+# The models modules define the tables on Base's metadata: the app's own
+# and the customer care system's (schema crm)
+from voice_agent.crm import models as crm_models  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from voice_agent.db import models
 
 # Configured here instead of an alembic.ini
@@ -23,6 +25,7 @@ def run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=models.Base.metadata,
         compare_type=True,
+        include_schemas=True,
     )
     with context.begin_transaction():
         context.run_migrations()

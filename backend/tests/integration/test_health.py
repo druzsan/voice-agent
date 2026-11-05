@@ -14,6 +14,8 @@ def test_status_describes_the_setup(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "database": "ok",
+        # The local speech models are English-only
+        "languages": ["en"],
         "llm": {"provider": "echo", "model": None, "configured": True},
         "stt": {
             "provider": "local",

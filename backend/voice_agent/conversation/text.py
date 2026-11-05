@@ -40,6 +40,17 @@ ABBREVIATIONS = frozenset(
         "inc.",
         "ltd.",
         "co.",
+        # German
+        "nr.",
+        "ca.",
+        "bzw.",
+        "str.",
+        "usw.",
+        "evtl.",
+        "ggf.",
+        "inkl.",
+        "zzgl.",
+        "tel.",
     }
 )
 # A sentence end: punctuation, optional closing quotes or brackets, whitespace
@@ -51,16 +62,18 @@ def _ends_with_abbreviation(sentence: str) -> bool:
     if not words:
         return False
     last = words[-1].lower().lstrip("\"'([")
-    # Single letters are initials, as in "J. R. R. Tolkien" or "U.S."
-    return last in ABBREVIATIONS or bool(re.fullmatch(r"([a-z]\.)+", last))
+    # Single letters are initials, as in "J. R. R. Tolkien" or "U.S." (and
+    # German "z. B."); one or two digits are a German ordinal ("am 10. November")
+    return last in ABBREVIATIONS or bool(re.fullmatch(r"([a-zäöü]\.)+|\d{1,2}\.", last))
 
 
 class SentenceBuffer:
     """Collects streamed text and hands out complete sentences, for speech.
 
-    English rules: a sentence ends at ., ! or ? followed by whitespace, or at
-    a line break, except after common abbreviations and initials. Decimals
-    ("3.5") have no whitespace after the period, so they never split.
+    A sentence ends at ., ! or ? followed by whitespace, or at a line break,
+    except after common English and German abbreviations, initials, and
+    German ordinals ("10. November"). Decimals ("3.5") have no whitespace
+    after the period, so they never split.
     """
 
     def __init__(self) -> None:

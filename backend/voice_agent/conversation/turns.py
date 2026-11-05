@@ -10,6 +10,15 @@ from uuid import UUID
 
 import anyio
 
+from voice_agent.agent.deps import CallDeps, CarrieSettings
+from voice_agent.agent.guardrails import (
+    guard,
+    mentions_danger,
+    redact_payment_data,
+    safety_language,
+)
+from voice_agent.agent.state import CallState
+from voice_agent.agent.templates import GREETING, template
 from voice_agent.conversation.records import (
     CallSetup,
     Conversation,
@@ -19,9 +28,9 @@ from voice_agent.conversation.records import (
     Source,
 )
 from voice_agent.conversation.repository import ConversationRepository
-from voice_agent.conversation.text import speakable
-from voice_agent.llm.prompts import GREETING
-from voice_agent.llm.responder import Responder
+from voice_agent.conversation.text import SentenceBuffer, speakable
+from voice_agent.crm.port import Crm
+from voice_agent.llm.responder import Reply, Responder, TurnTrace
 from voice_agent.speech.audio import read_wav, synthesize_clip
 from voice_agent.speech.ports import (
     AudioClip,
@@ -127,7 +136,11 @@ class TurnService:
         setup: CallSetup,
         history_messages: int,
         max_recording_s: float,
+        crm: Crm,
+        carrie: CarrieSettings,
     ) -> None:
+        self._crm = crm
+        self._carrie = carrie
         self._repository = repository
         self._recognizer = recognizer
         self._synthesizer = synthesizer
@@ -137,8 +150,15 @@ class TurnService:
         self._max_recording_s = max_recording_s
         self._locks: dict[UUID, anyio.Lock] = {}
 
-    async def start(self) -> Started:
-        conversation = await self._repository.create_conversation(self._setup)
+    async def start(self, caller_phone: str | None = None) -> Started:
+        conversation = await self._repository.create_conversation(
+            self._setup, caller_phone
+        )
+        await self._repository.save_state(
+            conversation.id,
+            CallState(caller_phone=caller_phone).model_dump(mode="json"),
+            "en",
+        )
         started = time.perf_counter()
         audio = await self._speak(GREETING)
         tts = _timed(audio.usage if audio else None, started)
@@ -226,6 +246,11 @@ class TurnService:
         stt: dict[str, float | int | None] | None = None,
         stt_usage: Usage | None = None,
     ) -> TurnResult:
+        # Card and account numbers never reach the transcript or the model
+        text = redact_payment_data(text)
+        state = CallState.model_validate(
+            await self._repository.get_state(conversation_id) or {}
+        )
         # History first, so it doesn't contain the new message twice
         history = await self._repository.recent_messages(
             conversation_id, self._history_messages
@@ -241,7 +266,25 @@ class TurnService:
                 usage=combine([stt_usage]) or None,
             ),
         )
-        reply = await self._responder.reply(history, text)
+        trace = TurnTrace()
+        deps = CallDeps(
+            state=state,
+            crm=self._crm,
+            settings=self._carrie,
+            conversation_id=conversation_id,
+        )
+        if not state.emergency and mentions_danger(text):
+            state.emergency = True
+            state.language = safety_language(
+                text, state.language, self._carrie.supported_languages
+            )
+            reply = Reply(template("emergency", state.language), "template")
+        else:
+            reply = await self._responder.reply(history, text, deps, trace)
+            reply = _checked(reply, state)
+        await self._repository.save_state(
+            conversation_id, state.model_dump(mode="json"), state.language
+        )
         stopwatch.lap("llm")
         speaking = time.perf_counter()
         audio = await self._speak(reply.text)
@@ -256,6 +299,8 @@ class TurnService:
                 timings_ms=stopwatch.total(),
                 llm_usage=reply.usage,
                 usage=combine([reply.metered, tts]) or None,
+                model_messages=trace.model_messages,
+                tool_calls=[event.as_record() for event in deps.events] or None,
             ),
         )
         logger.info("Turn in %s: %s", conversation_id, assistant_message.timings_ms)
@@ -268,3 +313,19 @@ class TurnService:
         except Exception:
             logger.exception("Speech synthesis failed")
             return None
+
+
+def _checked(reply: Reply, state: CallState) -> Reply:
+    """The reply with every sentence checked (voice_agent.agent.guardrails)."""
+    if reply.source != "llm":
+        return reply
+    buffer = SentenceBuffer()
+    sentences = [*buffer.push(reply.text), buffer.flush()]
+    kept = [
+        checked.text
+        for sentence in sentences
+        if sentence and (checked := guard(sentence, state)).text
+    ]
+    if not kept:
+        return Reply(template("llm_failed", state.language), "template")
+    return Reply(" ".join(kept), reply.source, reply.usage, reply.metered)

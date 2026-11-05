@@ -11,9 +11,11 @@ export type Phase =
   | 'listening' // waiting for the caller
   | 'thinking' // the backend works on an answer
   | 'speaking' // the answer is spoken
+  | 'on_hold' // transferred to a colleague; waits until the caller resumes
   | 'ended' // hung up; the transcript stays
 
-export interface TranscriptEntry {
+export interface MessageEntry {
+  kind: 'message'
   id: number
   role: Role
   source: Source
@@ -21,9 +23,24 @@ export interface TranscriptEntry {
   interrupted: boolean
 }
 
+// A tool Carrie used, between the messages
+export interface ToolEntry {
+  kind: 'tool'
+  id: string
+  name: string
+  status: 'ok' | 'refused' | 'failed'
+  label: string
+}
+
+export type TranscriptEntry = MessageEntry | ToolEntry
+
 export interface CallState {
   phase: Phase
   conversationId: string | null
+  // The number the call was placed from, as the backend took it
+  callerPhone: string | null
+  language: string
+  supportedLanguages: string[]
   messages: TranscriptEntry[]
   // The reply as the model writes it, until it's stored
   draft: { turn: number; text: string } | null
@@ -49,6 +66,9 @@ export type CallAction =
 export const initialCallState: CallState = {
   phase: 'idle',
   conversationId: null,
+  callerPhone: null,
+  language: 'en',
+  supportedLanguages: [],
   messages: [],
   draft: null,
   callerSpeaking: false,
@@ -61,7 +81,9 @@ export const initialCallState: CallState = {
 }
 
 export function isInCall(phase: Phase): boolean {
-  return phase === 'listening' || phase === 'thinking' || phase === 'speaking'
+  return (
+    phase === 'listening' || phase === 'thinking' || phase === 'speaking' || phase === 'on_hold'
+  )
 }
 
 const END_NOTICES: Partial<Record<string, string>> = {
@@ -73,7 +95,15 @@ function receive(state: CallState, message: ServerMessage, at: number): CallStat
   switch (message.type) {
     case 'call_started':
       return state.phase === 'connecting'
-        ? { ...state, phase: 'thinking', conversationId: message.conversation_id, startedAt: at }
+        ? {
+            ...state,
+            phase: 'thinking',
+            conversationId: message.conversation_id,
+            callerPhone: message.caller_phone,
+            language: message.language,
+            supportedLanguages: message.supported_languages,
+            startedAt: at,
+          }
         : state
     case 'state':
       return { ...state, phase: message.state }
@@ -86,6 +116,7 @@ function receive(state: CallState, message: ServerMessage, at: number): CallStat
         messages: [
           ...state.messages,
           {
+            kind: 'message',
             id: message.id,
             role: 'user',
             source: message.source,
@@ -109,6 +140,7 @@ function receive(state: CallState, message: ServerMessage, at: number): CallStat
         messages: [
           ...state.messages,
           {
+            kind: 'message',
             id: message.id,
             role: 'assistant',
             source: message.source,
@@ -117,6 +149,22 @@ function receive(state: CallState, message: ServerMessage, at: number): CallStat
           },
         ],
       }
+    case 'tool':
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            kind: 'tool',
+            id: `tool-${String(message.turn)}-${String(state.messages.length)}`,
+            name: message.name,
+            status: message.status,
+            label: message.label,
+          },
+        ],
+      }
+    case 'language':
+      return { ...state, language: message.language }
     case 'error':
       return { ...state, notice: message.message }
     case 'call_ended':

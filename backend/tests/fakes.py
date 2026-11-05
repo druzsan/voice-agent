@@ -3,20 +3,26 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import anyio
 import numpy as np
 
+from voice_agent.agent.deps import CallDeps, CarrieSettings
+from voice_agent.agent.state import CallState
 from voice_agent.conversation.records import (
     CallSetup,
     Conversation,
     ConversationDetail,
     ConversationSummary,
     EndReason,
+    FeedbackRating,
     Message,
     NewMessage,
 )
+from voice_agent.crm.memory import InMemoryCrm
 from voice_agent.speech.audio import SAMPLE_RATE, write_wav
 from voice_agent.speech.ports import AudioChunk, OnAudio, Samples, Transcript
 from voice_agent.speech.vad import FRAME_SAMPLES, SpeechProbability
@@ -34,14 +40,18 @@ class InMemoryConversationRepository:
     def __init__(self) -> None:
         self.conversations: dict[UUID, Conversation] = {}
         self.messages: list[Message] = []
+        self.states: dict[UUID, dict[str, Any]] = {}
         self.reachable = True
 
     async def ping(self) -> bool:
         return self.reachable
 
-    async def create_conversation(self, setup: CallSetup) -> Conversation:
+    async def create_conversation(
+        self, setup: CallSetup, caller_phone: str | None = None
+    ) -> Conversation:
         conversation = Conversation(
             **setup.model_dump(),
+            caller_phone=caller_phone,
             id=uuid4(),
             started_at=datetime.now(UTC),
             ended_at=None,
@@ -59,6 +69,38 @@ class InMemoryConversationRepository:
             self.conversations[conversation_id] = conversation.model_copy(
                 update={"ended_at": datetime.now(UTC), "end_reason": reason}
             )
+
+    async def get_state(self, conversation_id: UUID) -> dict[str, Any] | None:
+        return self.states.get(conversation_id)
+
+    async def save_state(
+        self, conversation_id: UUID, state: dict[str, Any], language: str
+    ) -> None:
+        self.states[conversation_id] = state
+        conversation = self.conversations.get(conversation_id)
+        if conversation is not None:
+            self.conversations[conversation_id] = conversation.model_copy(
+                update={"language": language}
+            )
+
+    async def save_feedback(
+        self,
+        conversation_id: UUID,
+        rating: FeedbackRating,
+        comment: str | None,
+    ) -> Conversation | None:
+        conversation = self.conversations.get(conversation_id)
+        if conversation is None:
+            return None
+        updated = conversation.model_copy(
+            update={
+                "feedback_rating": rating,
+                "feedback_comment": comment,
+                "feedback_at": datetime.now(UTC),
+            }
+        )
+        self.conversations[conversation_id] = updated
+        return updated
 
     async def add_message(self, conversation_id: UUID, message: NewMessage) -> Message:
         if conversation_id not in self.conversations:
@@ -239,3 +281,23 @@ def pcm(seconds: float, *, loud: bool) -> bytes:
     frames = round(seconds * SAMPLE_RATE / FRAME_SAMPLES)
     sample = 16_000 if loud else 0
     return np.full(frames * FRAME_SAMPLES, sample, dtype="<i2").tobytes()
+
+
+def call_deps(
+    state: CallState | None = None,
+    crm: InMemoryCrm | None = None,
+    *,
+    languages: tuple[str, ...] = ("en", "de"),
+    unavailable: frozenset[str] = frozenset(),
+) -> CallDeps:
+    """Carrie's dependencies for one call, with the seeded in-memory CRM."""
+    return CallDeps(
+        state=state or CallState(caller_phone="+4915199990000"),
+        crm=crm or InMemoryCrm.seeded(),
+        settings=CarrieSettings(
+            supported_languages=languages,
+            unavailable_routes=unavailable,
+            timezone=ZoneInfo("Europe/Berlin"),
+        ),
+        conversation_id=uuid4(),
+    )

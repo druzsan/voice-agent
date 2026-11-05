@@ -4,7 +4,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
-from voice_agent.api import call, conversations, health, status
+from voice_agent.api import call, conversations, desk, health, status
 from voice_agent.config import Settings
 from voice_agent.services import Services, production_services
 
@@ -37,7 +37,7 @@ def create_app(
 
     configure_logging()
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
-    for module in (health, status, conversations, call):
+    for module in (health, status, conversations, call, desk):
         app.include_router(module.router, prefix="/api")
     return app
 

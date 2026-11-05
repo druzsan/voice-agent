@@ -11,7 +11,9 @@ from tests.fakes import (
     FakeVad,
     InMemoryConversationRepository,
 )
+from voice_agent.agent.carrie import build_agent
 from voice_agent.config import Settings
+from voice_agent.crm.memory import InMemoryCrm
 from voice_agent.llm.providers import echo_model
 from voice_agent.llm.responder import Responder
 from voice_agent.main import create_app
@@ -44,7 +46,12 @@ def synthesizer() -> FakeSynthesizer:
 
 @pytest.fixture
 def responder() -> Responder:
-    return Responder(echo_model(), timeout_s=5, max_tokens=100)
+    return Responder(build_agent(echo_model()), timeout_s=5, max_tokens=100)
+
+
+@pytest.fixture
+def crm() -> InMemoryCrm:
+    return InMemoryCrm.seeded()
 
 
 @pytest.fixture
@@ -54,6 +61,7 @@ def services(
     recognizer: FakeRecognizer,
     synthesizer: FakeSynthesizer,
     responder: Responder,
+    crm: InMemoryCrm,
 ) -> Services:
     return Services(
         settings=settings,
@@ -62,6 +70,7 @@ def services(
         synthesizer=synthesizer,
         responder=responder,
         vad=FakeVad(),
+        crm=crm,
     )
 
 

@@ -1,11 +1,11 @@
 # Voice Agent
 
-A minimal voice conversation app that works like a phone call. Press the green button to call and just talk: the assistant notices when you pause, starts speaking its answer while it's still writing it, and stops when you talk over it. You can also type, or enter digits on the keypad. The red button hangs up. Every conversation is stored in PostgreSQL.
+**Carrie**, the first-contact customer care voice agent of TAC ("The Automotive Company"), in an app that works like a phone call. Press the green button to call and just talk: Carrie notices when you pause, starts speaking her answer while she's still writing it, and stops when you talk over it. She handles delivery inquiries, EV charging problems, the vehicle app and warranty or service disputes; looks up orders and tickets in a customer care system; adds information to open tickets or opens new ones; and transfers to a colleague with a handover summary. You can also type, or enter digits on the keypad. The red button hangs up. Every conversation is stored in PostgreSQL; the **Care desk** tab shows tickets and transfers.
 
 - **Speech recognition:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (English `small.en` by default), on the CPU. Or OpenAI: `gpt-live-transcribe` over the Realtime API while the caller speaks, `gpt-4o-mini-transcribe` for whole recordings
 - **Turn detection:** the [Silero VAD](https://github.com/snakers4/silero-vad) model that faster-whisper ships, via ONNX Runtime
 - **Speech synthesis:** [Piper](https://github.com/OHF-Voice/piper1-gpl) (voice `en_US-lessac-medium` by default), on the CPU. Or OpenAI: `gpt-4o-mini-tts` (voice `marin`), played as it's generated
-- **Language model:** [PydanticAI](https://ai.pydantic.dev/) with OpenAI, [Requesty](https://www.requesty.ai/) or [OpenRouter](https://openrouter.ai/). By default `gpt-6.1-sol` on Azure in Germany, through Requesty's EU router. It answers plainly, with no tools or agent logic yet. The `echo` provider repeats the caller and needs no key.
+- **Language model:** [PydanticAI](https://ai.pydantic.dev/) with OpenAI, [Requesty](https://www.requesty.ai/) or [OpenRouter](https://openrouter.ai/). By default `gpt-6.1-sol` on Azure in Germany, through Requesty's EU router. One agent with six tools (see [Carrie](#carrie-the-customer-care-agent)). The `echo` provider repeats the caller and needs no key.
 - **Storage:** PostgreSQL with SQLAlchemy and Alembic migrations
 
 Everything runs in Docker Compose. The speech models live in [backend/models](backend/models), which the backend container mounts read-write. Whatever is missing there is downloaded at startup, at pinned revisions; on the host, the same code uses the same folder.
@@ -54,6 +54,46 @@ make down  # stop and remove the containers (the database volume stays)
 make clean # also remove the database volume and the built images (the models in backend/models stay)
 ```
 
+## Carrie, the customer care agent
+
+One agent, one set of instructions, six tools ([backend/voice_agent/agent](backend/voice_agent/agent)). The behavior follows the specifications in [dev/](dev/) (delivery, charging, connected services, warranty); [dev/carrie-agent-plan.md](dev/carrie-agent-plan.md) explains the design.
+
+- **Instructions:** [core rules](backend/voice_agent/agent/prompts/core.md) (voice style, empathy, uncertainty, priorities, privacy, commitments, tickets and transfers, language), one guide per topic, and short example dialogues. Before every model call, a state block adds the date and time, the conversation language, the caller's number, verified orders, the tickets of this call, failed identification attempts, transfers and whether danger was reported. Intent, topic switching and resuming a paused topic are left to the model, as the specs ask.
+- **Tools** ([tools.py](backend/voice_agent/agent/tools.py)), each enforcing its own rules in code:
+
+  | Tool | What it does | Rules in code |
+  |---|---|---|
+  | `lookup_order` | Delivery status | Order number, postal code exact; name after normalization (Müller = Mueller); model loosely (`X5`). Never says which detail failed. Locked after 2 failures. Flags outdated or passed estimates |
+  | `find_open_tickets` | The caller's open tickets | Last name + ticket, order or phone number; the line's number by default. Locked after 2 failures |
+  | `add_ticket_note` | New information on a ticket | Only tickets found or created in this call; priority only goes up; reopens a ticket waiting on the customer |
+  | `create_ticket` | A ticket for the responsible team | Needs an order number (marked verified or not) and a phone number (the line's by default); one per topic and call |
+  | `handover_to_human` | Transfer to a team | No customer data needed; summary in the conversation language, with the language; the call then goes on hold |
+  | `set_language` | Switch the conversation language | Only supported languages; others → offer the `language_support` team |
+
+- **Guardrails** ([guardrails.py](backend/voice_agent/agent/guardrails.py)): smoke, fire, sparks, burning smell or overheating (English and German, negations and figures of speech such as "die Hütte brennt" excluded) get the approved safety guidance at once, without the model. Card and IBAN numbers are removed before anything is stored or sent to the model. Every reply sentence is checked before it's shown or spoken: commitments (refunds, rental cars, warranty decisions) are replaced by "the responsible team decides", safety assurances by "I can't confirm that it's safe", and claims of a ticket, a transfer or an emergency call that the tools didn't confirm are left out.
+- **Languages:** Carrie greets in English, follows the caller into German and back, and stores the language with the conversation. German needs OpenAI speech (both `STT_PROVIDER` and `TTS_PROVIDER` `openai`); with the local Whisper `.en` model and the English Piper voice, Carrie speaks English only. Other languages get an offer of a transfer.
+- **Caller number:** the phone page dials from a random German mobile number, new for every call; type your own to call as one of the seeded customers.
+- **Previous calls:** while no call runs, the arrows next to the phone's title step through the stored calls like a carousel (‹ older, › newer and back to the phone), with their transcript, Carrie's tool calls, time, length, number and language.
+- **Feedback:** under a finished call and under each previous call, 👍 or 👎 and an optional comment, stored with the conversation.
+- **Transfers:** `VOICE_AGENT_UNAVAILABLE_ROUTES` (e.g. `roadside_assistance`) lets a team report "no colleague available". A successful transfer puts the call on hold: the yellow button continues the conversation with Carrie, the **Care desk** tab shows the waiting transfer with its summary.
+
+### Customer care system
+
+A simulated CRM in its own PostgreSQL schema `crm` ([backend/voice_agent/crm](backend/voice_agent/crm)): customers, vehicles, orders, tickets with notes, and handovers. The agent reaches it only through a port ([port.py](backend/voice_agent/crm/port.py)); a real system would be another implementation. The `migrate` service loads 20 starting cases into an empty system, 5 per topic, with BMW models and dates relative to the day of loading; `make seed` resets it.
+
+| Topic | Try for example | Calling from |
+|---|---|---|
+| Delivery | Order `456789`, Jana Müller, 10115, iX3: confirmed date. `527713`, Katrin Weber, 50667, X5: missed estimate, open ticket. `610938`, Lukas Fischer, 70173, 330e Touring: outdated status | `+49 151 22000101` to `…105` |
+| Charging | Markus Hoffmann: open wallbox ticket CC-10006. Julia Koch: stuck connector, CC-10009 | `+49 151 22000201` to `…205` |
+| App | Andreas Wolf: sign-in error, CC-10012. Christina Schröder: used car, no order number | `+49 151 22000301` to `…305` |
+| Warranty | Daniel Zimmermann: rejected A/C claim, order `198330`. Melanie Braun: disputed invoice | `+49 151 22000401` to `…405` |
+
+All cases: [seed_data.py](backend/voice_agent/crm/seed_data.py).
+
+### Evaluation
+
+`make eval` runs 16 scenarios from the specs against the configured model ([scenario_eval.py](backend/scripts/scenario_eval.py)): a second model plays the caller from a persona, the turns run through the app's own turn path against the starting data in memory, hard checks verify the tools and the call state, and a judge model rates each scenario against the specs' expected behavior and the empathy (1–5). `make eval args="--only DEL-1 CHG-10"` runs a selection, `--no-judge` only the hard checks, `--report eval.md` writes the results.
+
 ## How a call works
 
 A call is one WebSocket connection (`/api/call`), and one conversation. Connecting starts it, losing the connection ends it:
@@ -80,12 +120,15 @@ The backend decides the call's state and announces it: `listening`, `thinking` (
 |---|---|
 | `GET /api/health` | Liveness, for the container health check |
 | `GET /api/status` | Database reachable, model in use, speech models (with the fallback recognizer and the speaking pace), recording limit |
-| `WS /api/call` | A live call, see below |
-| `POST /api/conversations` | Push-to-talk call over HTTP: conversation, greeting and its audio |
+| `WS /api/call?phone=+49…` | A live call from the given number, see below |
+| `POST /api/conversations` | Push-to-talk call over HTTP (`{"caller_phone"}` optional): conversation, greeting and its audio |
 | `POST /api/conversations/{id}/turns/voice` | A recording (`audio/wav`, 16 kHz mono 16-bit) → caller message, answer and audio |
 | `POST /api/conversations/{id}/turns/text` | Typed text or keypad digits (`{"text", "via"}`) → the same |
 | `POST /api/conversations/{id}/end` | Hang up (`{"reason": "hangup" \| "page_closed"}`); waits for a running turn; ending twice changes nothing |
-| `GET /api/conversations`, `GET /api/conversations/{id}` | Stored conversations with their messages |
+| `GET /api/conversations`, `GET /api/conversations/{id}` | Stored conversations with their messages (and tool calls) and feedback |
+| `PUT /api/conversations/{id}/feedback` | The caller's feedback on a call: `{"rating": "up" \| "down", "comment"}`; giving it again replaces it |
+| `GET /api/desk/tickets`, `GET /api/desk/tickets/{reference}` | Tickets with notes (`?status=`, `?topic=`), for the care desk |
+| `GET /api/desk/handovers` | Transfers with their summaries, newest first |
 
 The HTTP conversation endpoints answer one complete request at a time, without streaming or turn detection. The page uses the WebSocket; the HTTP endpoints remain for scripts and tests. Interactive docs: http://localhost:8000/docs in development mode.
 
@@ -98,25 +141,28 @@ The live call's messages ([protocol.py](backend/voice_agent/conversation/protoco
 | → | `{"type": "played", "clip"}` | A clip played to the end (or at least 90 % of it) |
 | → | `{"type": "mute", "muted"}` | Microphone muted or unmuted; muting drops a partly heard utterance |
 | → | `{"type": "hangup"}` | Red button |
-| ← | `call_started {conversation_id}` | First message |
-| ← | `state {state}` | `listening`, `thinking` or `speaking` |
+| → | `{"type": "resume"}` | Yellow button: continue after being on hold |
+| ← | `call_started {conversation_id, caller_phone, language, supported_languages}` | First message |
+| ← | `state {state}` | `listening`, `thinking`, `speaking` or `on_hold` (after a transfer) |
 | ← | `caller_speech {active}` | The voice detection hears the caller start or stop talking |
 | ← | `user_message {id, text, source}` | The caller's stored message |
-| ← | `assistant_delta {turn, text}` | More of the answer, as the model writes it |
+| ← | `assistant_delta {turn, text}` | The next sentence of the answer, once it has passed the reply check |
+| ← | `tool {turn, name, status, label, data}` | Carrie used a tool (`ok`, `refused` or `failed`) |
+| ← | `language {language}` | The conversation continues in another language |
 | ← | `audio {clip, turn, sample_rate, pcm_base64}` | More audio of a spoken sentence: mono PCM16, little-endian |
 | ← | `audio_end {clip, turn, text, duration_ms}` | The sentence's last piece has been sent |
 | ← | `assistant_message {id, turn, text, source, interrupted}` | The stored answer |
 | ← | `interrupted {turn}` | The caller talked over the answer: stop playing, drop queued clips |
 | ← | `turn_done {turn, timings_ms, usage}` | Stage timings of the turn, and what its model calls consumed |
 | ← | `usage {usage}` | Consumption outside of a turn: recognizing speech that turned out to be nothing |
-| ← | `error {code, message}` | `invalid_message`, `stt_failed` or `busy`; the call goes on |
+| ← | `error {code, message}` | `invalid_message`, `stt_failed`, `busy` or `on_hold`; the call goes on |
 | ← | `call_ended {reason}` | Last message before the backend closes the connection |
 
 Only pages of this app may connect: a browser's `Origin` must match the `Host` (nginx and Vite pass it on). If the database isn't reachable, the backend closes the connection with code 1011; an oversized frame closes it with 1009.
 
 ### Stored data
 
-- **`conversations`:** start and end, end reason (`hangup`, `page_closed`, `disconnect`, `timeout` or `error`), and the configuration the call ran with (provider, model, speech recognition model, voice; OpenAI models as e.g. `openai/gpt-live-transcribe` and `openai/gpt-4o-mini-tts/marin`), so answers stay comparable across setups.
+- **`conversations`:** start and end, end reason (`hangup`, `page_closed`, `disconnect`, `timeout` or `error`), and the configuration the call ran with (provider, model, speech recognition model, voice; OpenAI models as e.g. `openai/gpt-live-transcribe` and `openai/gpt-4o-mini-tts/marin`), so answers stay comparable across setups; the caller's number, the conversation language, Carrie's call state (`state`), and the caller's feedback (`feedback_rating`, `feedback_comment`, `feedback_at`).
 - **`messages`:** role, source and text for each message:
   - **Sources:** `voice`, `keyboard`, `keypad`, `llm` or `template`.
   - **Interrupted answers:** `interrupted`, and in `heard_text` the part the caller heard.
@@ -124,6 +170,8 @@ Only pages of this app may connect: a browser's `Origin` must match the `Host` (
   - **Recognition metrics:** audio length, average log probability, no-speech probability (the last two only from Whisper).
   - **Token usage** of the answer.
   - **Usage per service and model** (`usage`): calls, tokens in and out, audio seconds heard or spoken, the calls' time and their cost in USD. Speech recognition is stored on the caller's message, the language model and speech synthesis on the answer.
+  - **Tools:** the turn's tool calls and results as the model saw them (`model_messages`, replayed as history) and as the transcript shows them (`tool_calls`).
+- **Schema `crm`:** the customer care system (see [above](#customer-care-system)).
 
 Audio is not stored.
 
@@ -144,7 +192,7 @@ Local models (faster-whisper, Piper) report audio and time and cost nothing. A c
 | Service | Role |
 |---|---|
 | `postgres` | PostgreSQL 18; data in the `database` volume |
-| `migrate` | Runs `alembic upgrade head` once, then exits; the backend starts after it |
+| `migrate` | Runs `alembic upgrade head` and loads the starting cases into an empty customer care system, then exits; the backend starts after it |
 | `backend` | FastAPI, one process: speech models, language model, conversation storage |
 | `frontend` | nginx serving the React/Mantine app and forwarding `/api` (in development: Vite) |
 
@@ -166,6 +214,9 @@ make test         # backend and frontend tests (storage in memory, no containers
 make test-speech  # Piper speaks, the voice detection and Whisper listen: the real models (downloaded into backend/models if missing)
 make test-openai  # OpenAI speaks, its file and live transcription listen (needs OPENAI_API_KEY; a few cents)
 make call-smoke   # a scripted live call against the running stack (args="--speak question.wav" speaks a 16 kHz WAV)
+make test-db      # the customer care system against PostgreSQL (needs `make dev`; creates its own test database)
+make eval         # Carrie's scenario evaluation against the configured model (costs tokens)
+make seed         # reset the customer care system to its 20 starting cases
 ```
 
 ### Database migrations
@@ -224,7 +275,9 @@ These are single manual measurements, not a benchmark. They were taken with a 0.
 - A call that loses its connection can't be resumed: it has ended, like a phone call.
 - No login: the app is published on `localhost` only.
 - One backend process; per-conversation turn locks live in memory.
-- English only.
+- Languages: English with the local speech models; English and German with OpenAI's. The conversation language isn't passed to speech recognition as a hint yet.
+- The transfer is simulated: the handover is stored and the call waits on hold, but no person joins.
+- No silence check-in yet (spec CON-6): a caller who stops responding isn't asked whether they're still there.
 
 ## Third-party licences
 
