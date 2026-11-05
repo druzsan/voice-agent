@@ -21,18 +21,20 @@ class FasterWhisperRecognizer:
         # One recognition at a time; parallel runs would only compete for the cores
         self._limiter = anyio.CapacityLimiter(1)
 
-    async def transcribe(self, samples: Samples) -> Transcript:
+    async def transcribe(
+        self, samples: Samples, *, trim_silence: bool = True
+    ) -> Transcript:
         return await to_thread.run_sync(
-            self._transcribe, samples, limiter=self._limiter
+            self._transcribe, samples, trim_silence, limiter=self._limiter
         )
 
-    def _transcribe(self, samples: Samples) -> Transcript:
+    def _transcribe(self, samples: Samples, trim_silence: bool) -> Transcript:
         segments, _ = self._model.transcribe(
             samples,
             language="en",
             beam_size=self._beam_size,
             # Trims the silence before and after the caller's words
-            vad_filter=True,
+            vad_filter=trim_silence,
             condition_on_previous_text=False,
             without_timestamps=True,
         )

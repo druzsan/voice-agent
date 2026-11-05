@@ -5,7 +5,12 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.fakes import FakeRecognizer, FakeSynthesizer, InMemoryConversationRepository
+from tests.fakes import (
+    FakeRecognizer,
+    FakeSynthesizer,
+    FakeVad,
+    InMemoryConversationRepository,
+)
 from voice_agent.config import Settings
 from voice_agent.llm.providers import echo_model
 from voice_agent.llm.responder import Responder
@@ -56,6 +61,7 @@ def services(
         recognizer=recognizer,
         synthesizer=synthesizer,
         responder=responder,
+        vad=FakeVad(),
     )
 
 

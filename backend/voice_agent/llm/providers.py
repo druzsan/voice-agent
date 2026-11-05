@@ -1,4 +1,5 @@
 import logging
+from collections.abc import AsyncIterator
 
 from pydantic import SecretStr
 from pydantic_ai.exceptions import UserError
@@ -31,13 +32,25 @@ def _last_user_text(messages: list[ModelMessage]) -> str:
     return ""
 
 
+def _echo_text(messages: list[ModelMessage]) -> str:
+    return f"You said: {_last_user_text(messages)}"
+
+
 def _echo(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    return ModelResponse(parts=[TextPart(f"You said: {_last_user_text(messages)}")])
+    return ModelResponse(parts=[TextPart(_echo_text(messages))])
+
+
+async def _echo_stream(
+    messages: list[ModelMessage], info: AgentInfo
+) -> AsyncIterator[str]:
+    # Word by word, like a provider streams its tokens
+    for word in _echo_text(messages).split(" "):
+        yield f"{word} "
 
 
 def echo_model() -> Model:
     """Repeats the caller: the full reply path without a provider or key."""
-    return FunctionModel(_echo, model_name="echo")
+    return FunctionModel(_echo, stream_function=_echo_stream, model_name="echo")
 
 
 def _key(name: str, key: SecretStr | None) -> str | None:

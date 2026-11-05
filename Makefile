@@ -8,6 +8,8 @@ PNPM := pnpm --dir frontend
 DEV_COMPOSE := docker compose -f compose.yaml -f compose.dev.yaml
 # Message of a new migration (make db-revision m="...")
 m ?=
+# Arguments of the scripted live call (make call-smoke args="...")
+args ?=
 
 .PHONY: help
 help: ## List the available targets
@@ -96,6 +98,10 @@ psql: ## Open psql on the dev database
 .PHONY: llm-smoke
 llm-smoke: ## Ask the configured language model one question (settings from .env)
 	$(UV_RUN) python -m scripts.llm_smoke
+
+.PHONY: call-smoke
+call-smoke: ## Make a scripted live call against the running stack: make call-smoke args="--speak question.wav"
+	$(UV_RUN) python -m scripts.call_smoke $(args)
 
 .PHONY: down
 down: ## Stop and remove the containers

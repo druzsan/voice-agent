@@ -19,17 +19,15 @@ const KEYS: readonly (readonly [string, string])[] = [
 
 interface KeypadProps {
   onKey: (key: string) => void
-  disabled: boolean
 }
 
-export function Keypad({ onKey, disabled }: KeypadProps) {
+export function Keypad({ onKey }: KeypadProps) {
   return (
     <SimpleGrid cols={3} spacing="xs" verticalSpacing="xs" className={classes['keypad']}>
       {KEYS.map(([key, letters]) => (
         <UnstyledButton
           key={key}
           className={classes['key']}
-          disabled={disabled}
           aria-label={key === '#' ? '# (send)' : key}
           onClick={() => {
             onKey(key)

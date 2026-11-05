@@ -1,19 +1,43 @@
 import { MantineProvider } from '@mantine/core'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { Message, Status, TurnResponse } from './api/conversations.ts'
+import type { ClientMessage, ServerMessage } from './api/callProtocol.ts'
+import type { Status } from './api/conversations.ts'
 import App from './App.tsx'
 import { theme } from './theme.ts'
 
-// No real audio in jsdom: clips "play" instantly, the microphone is unavailable
+// No real audio in jsdom: clips "play" at once; the test decides whether
+// there's a microphone
+const audio = vi.hoisted(() => ({
+  frames: null as ((pcm: Int16Array<ArrayBuffer>) => void) | null,
+  microphone: true,
+  stopped: 0,
+}))
 vi.mock('./audio/playback.ts', () => ({
-  playClip: () => ({ done: Promise.resolve(), stop: vi.fn() }),
+  ClipPlayer: class {
+    private readonly onPlayed: (clip: number) => void
+    constructor(onPlayed: (clip: number) => void) {
+      this.onPlayed = onPlayed
+    }
+    enqueue(clip: { clip: number }) {
+      this.onPlayed(clip.clip)
+    }
+    stop() {
+      audio.stopped += 1
+    }
+  },
   playKeyTone: vi.fn(),
 }))
-vi.mock('./audio/recorder.ts', () => ({
-  startRecording: () => Promise.reject(new Error('No microphone in tests')),
+vi.mock('./audio/microphone.ts', () => ({
+  openMicrophone: (onFrame: (pcm: Int16Array<ArrayBuffer>) => void) => {
+    if (!audio.microphone) {
+      return Promise.reject(new Error('No microphone in tests.'))
+    }
+    audio.frames = onFrame
+    return Promise.resolve({ close: vi.fn() })
+  },
 }))
 
 const status: Status = {
@@ -23,57 +47,57 @@ const status: Status = {
   tts: { model: 'en_US-lessac-medium' },
 }
 
-function message(id: number, role: Message['role'], source: Message['source'], text: string) {
-  return { id, role, source, text, created_at: '2026-11-04T12:00:00Z', timings_ms: null }
-}
+// The backend's end of the call
+class FakeSocket {
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+  static readonly CLOSING = 2
+  static readonly CLOSED = 3
+  static last: FakeSocket | null = null
 
-const audio = { media_type: 'audio/wav', wav_base64: 'UklGRg==', duration_ms: 100 }
+  readonly url: string
+  readyState = FakeSocket.CONNECTING
+  readonly sent: (ClientMessage | Int16Array)[] = []
+  onmessage: ((event: { data: string }) => void) | null = null
+  onclose: (() => void) | null = null
+  onopen: (() => void) | null = null
 
-interface Call {
-  url: string
-  method: string
-  body: unknown
-}
+  constructor(url: string) {
+    this.url = url
+    FakeSocket.last = this
+  }
 
-function mockBackend() {
-  const calls: Call[] = []
-  let nextId = 2
-  const fetchMock = vi.fn<typeof fetch>((input, init) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    const method = init?.method ?? 'GET'
-    const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body
-    calls.push({ url, method, body })
-    if (url === '/api/status') {
-      return Promise.resolve(Response.json(status))
-    }
-    if (url === '/api/conversations' && method === 'POST') {
-      return Promise.resolve(
-        Response.json(
-          {
-            conversation: { id: 'c1', started_at: '', ended_at: null },
-            greeting: message(1, 'assistant', 'template', 'Hello, how can I help you?'),
-            audio,
-          },
-          { status: 201 },
-        ),
-      )
-    }
-    if (url.endsWith('/turns/text')) {
-      const { text, via } = body as { text: string; via: Message['source'] }
-      const answer: TurnResponse = {
-        user_message: message(nextId++, 'user', via, text),
-        assistant_message: message(nextId++, 'assistant', 'llm', `You said: ${text}`),
-        audio: null,
+  send(data: string | Int16Array) {
+    this.sent.push(typeof data === 'string' ? (JSON.parse(data) as ClientMessage) : data)
+  }
+
+  close() {
+    this.readyState = FakeSocket.CLOSED
+  }
+
+  open() {
+    this.readyState = FakeSocket.OPEN
+    this.onopen?.()
+  }
+
+  push(...messages: ServerMessage[]) {
+    act(() => {
+      for (const message of messages) {
+        this.onmessage?.({ data: JSON.stringify(message) })
       }
-      return Promise.resolve(Response.json(answer))
-    }
-    if (url.endsWith('/end')) {
-      return Promise.resolve(new Response(null, { status: 204 }))
-    }
-    return Promise.resolve(new Response(null, { status: 404 }))
-  })
-  vi.stubGlobal('fetch', fetchMock)
-  return calls
+    })
+  }
+
+  drop() {
+    act(() => {
+      this.readyState = FakeSocket.CLOSED
+      this.onclose?.()
+    })
+  }
+
+  messages(): ClientMessage[] {
+    return this.sent.filter((data): data is ClientMessage => !(data instanceof Int16Array))
+  }
 }
 
 function renderApp() {
@@ -84,19 +108,47 @@ function renderApp() {
   )
 }
 
-async function dial() {
+const greeting = 'Hello, how can I help you?'
+
+async function dial(): Promise<FakeSocket> {
   await userEvent.click(await screen.findByRole('button', { name: 'Start call' }))
-  await screen.findByText('Hello, how can I help you?')
-  await waitFor(() => {
-    expect(screen.getByRole('textbox', { name: 'Message' })).toBeEnabled()
+  const socket = FakeSocket.last
+  if (socket === null) {
+    throw new Error('No connection')
+  }
+  act(() => {
+    socket.open()
   })
+  socket.push(
+    { type: 'call_started', conversation_id: 'c1' },
+    { type: 'state', state: 'speaking' },
+    { type: 'assistant_delta', turn: 1, text: greeting },
+    { type: 'audio', clip: 1, turn: 1, text: greeting, duration_ms: 900, wav_base64: '' },
+    {
+      type: 'assistant_message',
+      id: 1,
+      turn: 1,
+      text: greeting,
+      source: 'template',
+      interrupted: false,
+    },
+    { type: 'state', state: 'listening' },
+  )
+  await screen.findByText(greeting)
+  return socket
 }
 
 describe('Phone', () => {
-  let calls: Call[]
-
   beforeEach(() => {
-    calls = mockBackend()
+    audio.microphone = true
+    audio.frames = null
+    audio.stopped = 0
+    FakeSocket.last = null
+    vi.stubGlobal('WebSocket', FakeSocket)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(() => Promise.resolve(Response.json(status))),
+    )
   })
 
   it('shows the configured model before the call', async () => {
@@ -105,22 +157,49 @@ describe('Phone', () => {
     expect(await screen.findByText('LLM: requesty · azure/gpt-4.1-mini')).toBeInTheDocument()
   })
 
-  it('greets the caller and answers a typed message', async () => {
+  it('connects, greets and acknowledges the played clips', async () => {
     renderApp()
-    await dial()
+    const socket = await dial()
+
+    expect(socket.url).toBe('ws://localhost:3000/api/call')
+    expect(socket.messages()).toEqual([{ type: 'played', clip: 1 }])
+    expect(await screen.findByText(/Listening…/)).toBeInTheDocument()
+  })
+
+  it('streams the microphone and shows the answer as it is written', async () => {
+    renderApp()
+    const socket = await dial()
+    await waitFor(() => {
+      expect(audio.frames).not.toBeNull()
+    })
+
+    audio.frames?.(new Int16Array(512))
+    socket.push(
+      { type: 'caller_speech', active: true },
+      { type: 'caller_speech', active: false },
+      { type: 'state', state: 'thinking' },
+      { type: 'user_message', id: 2, text: 'What time is it?', source: 'voice' },
+      { type: 'assistant_delta', turn: 2, text: 'It is ' },
+    )
+
+    expect(socket.sent.some((data) => data instanceof Int16Array)).toBe(true)
+    expect(screen.getByText('What time is it?')).toBeInTheDocument()
+    expect(screen.getByLabelText('Answer so far')).toHaveTextContent('It is')
+  })
+
+  it('sends typed messages at any time', async () => {
+    renderApp()
+    const socket = await dial()
+    socket.push({ type: 'state', state: 'speaking' })
 
     await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), 'Hi there{Enter}')
 
-    expect(await screen.findByText('You said: Hi there')).toBeInTheDocument()
-    expect(calls.find((call) => call.url.endsWith('/turns/text'))?.body).toEqual({
-      text: 'Hi there',
-      via: 'keyboard',
-    })
+    expect(socket.messages()).toContainEqual({ type: 'text', text: 'Hi there', via: 'keyboard' })
   })
 
   it('sends keypad digits with the # key', async () => {
     renderApp()
-    await dial()
+    const socket = await dial()
 
     await userEvent.click(screen.getByRole('button', { name: 'Show keypad' }))
     for (const key of ['4', '7', '1', '1']) {
@@ -129,35 +208,72 @@ describe('Phone', () => {
     expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('4711')
     await userEvent.click(screen.getByRole('button', { name: '# (send)' }))
 
-    expect(await screen.findByText('You said: 4711')).toBeInTheDocument()
-    expect(calls.find((call) => call.url.endsWith('/turns/text'))?.body).toEqual({
-      text: '4711',
-      via: 'keypad',
+    expect(socket.messages()).toContainEqual({ type: 'text', text: '4711', via: 'keypad' })
+  })
+
+  it('stops speaking when the caller interrupts', async () => {
+    renderApp()
+    const socket = await dial()
+
+    socket.push({ type: 'interrupted', turn: 2 })
+
+    expect(audio.stopped).toBe(1)
+  })
+
+  it('mutes the microphone', async () => {
+    renderApp()
+    const socket = await dial()
+    const mute = await screen.findByRole('button', { name: 'Mute' })
+    await waitFor(() => {
+      expect(mute).toBeEnabled()
     })
+
+    await userEvent.click(mute)
+    audio.frames?.(new Int16Array(512))
+
+    expect(socket.messages()).toContainEqual({ type: 'mute', muted: true })
+    expect(socket.sent.some((data) => data instanceof Int16Array)).toBe(false)
+    expect(screen.getByRole('button', { name: 'Unmute' })).toBeInTheDocument()
   })
 
   it('explains when the microphone is not available', async () => {
+    audio.microphone = false
     renderApp()
     await dial()
 
-    await userEvent.click(screen.getByRole('button', { name: 'Talk' }))
-
-    expect(await screen.findByText('No microphone in tests')).toBeInTheDocument()
+    expect(await screen.findByText(/No microphone in tests/)).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Message' })).toBeEnabled()
   })
 
   it('hangs up, keeps the transcript and can call again', async () => {
     renderApp()
-    await dial()
+    const socket = await dial()
 
     await userEvent.click(screen.getByRole('button', { name: 'Hang up' }))
 
+    expect(socket.messages()).toContainEqual({ type: 'hangup' })
+    expect(socket.readyState).toBe(FakeSocket.CLOSED)
     expect(await screen.findByText(/Call ended/)).toBeInTheDocument()
-    expect(screen.getByText('Hello, how can I help you?')).toBeInTheDocument()
+    expect(screen.getByText(greeting)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Call again' })).toBeInTheDocument()
-    expect(calls.find((call) => call.url === '/api/conversations/c1/end')?.body).toEqual({
-      reason: 'hangup',
-    })
+  })
+
+  it('says so when the connection is lost', async () => {
+    renderApp()
+    const socket = await dial()
+
+    socket.drop()
+
+    expect(await screen.findByText('The connection was lost.')).toBeInTheDocument()
+  })
+
+  it('says so when the call cannot start', async () => {
+    renderApp()
+    await userEvent.click(await screen.findByRole('button', { name: 'Start call' }))
+
+    FakeSocket.last?.drop()
+
+    expect(await screen.findByText(/Couldn't start the call/)).toBeInTheDocument()
   })
 
   it('says so when the backend is unreachable', async () => {

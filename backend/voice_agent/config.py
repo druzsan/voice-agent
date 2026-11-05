@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     tts_voice: str = Field(
         default="en_US-lessac-medium", pattern=r"^en_[A-Z]{2}-\w+-\w+$"
     )
+    # Live calls: the caller's turn ends after this much silence; speech
+    # shorter than barge_in_ms doesn't interrupt a reply ("mhm", coughs, echo)
+    vad_threshold: float = Field(default=0.5, gt=0.15, lt=1)
+    vad_silence_ms: int = Field(default=700, ge=100)
+    barge_in_ms: int = Field(default=400, ge=0)
+    max_call_s: float = Field(default=900, gt=0)
     # Speech model files, downloaded here at startup when missing. Compose
     # mounts the host's backend/models, so both use the same files.
     models_dir: Path = BACKEND_DIR / "models"

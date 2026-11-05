@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { Downsampler, encodeWav } from './pcm.ts'
+import { Downsampler, Framer } from './pcm.ts'
 
 describe('Downsampler', () => {
   it('turns 48 kHz into 16 kHz by averaging every three samples', () => {
@@ -23,19 +23,17 @@ describe('Downsampler', () => {
   })
 })
 
-describe('encodeWav', () => {
-  it('writes a 16 kHz mono 16-bit WAV header before the samples', async () => {
-    const wav = encodeWav([new Int16Array([1, 2]), new Int16Array([3])])
-    const view = new DataView(await wav.arrayBuffer())
-    const text = (offset: number) => String.fromCharCode(...new Uint8Array(view.buffer, offset, 4))
+describe('Framer', () => {
+  it('hands out full frames and keeps the rest for later', () => {
+    const framer = new Framer(4)
 
-    expect(wav.type).toBe('audio/wav')
-    expect(view.byteLength).toBe(44 + 6)
-    expect([text(0), text(8), text(12), text(36)]).toEqual(['RIFF', 'WAVE', 'fmt ', 'data'])
-    expect(view.getUint16(22, true)).toBe(1)
-    expect(view.getUint32(24, true)).toBe(16000)
-    expect(view.getUint16(34, true)).toBe(16)
-    expect(view.getUint32(40, true)).toBe(6)
-    expect([44, 46, 48].map((offset) => view.getInt16(offset, true))).toEqual([1, 2, 3])
+    expect(framer.push(new Int16Array([1, 2, 3]))).toEqual([])
+    const frames = framer.push(new Int16Array([4, 5, 6, 7, 8, 9, 10]))
+
+    expect(frames.map((frame) => Array.from(frame))).toEqual([
+      [1, 2, 3, 4],
+      [5, 6, 7, 8],
+    ])
+    expect(Array.from(framer.push(new Int16Array([11, 12]))[0] ?? [])).toEqual([9, 10, 11, 12])
   })
 })

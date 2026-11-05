@@ -1,16 +1,17 @@
 import captureUrl from './captureWorklet.ts?worker&url'
-import { encodeWav } from './pcm.ts'
 
-export interface Recording {
-  // Stops recording and returns the WAV, ready for the backend
-  stop: () => Blob
-  // Stops recording and throws the audio away
-  cancel: () => void
+export interface Microphone {
+  // Releases the microphone
+  close: () => void
 }
 
-// Records the microphone as 16 kHz PCM until stopped. The browser's echo
-// cancellation and noise suppression clean up the signal first.
-export async function startRecording(): Promise<Recording> {
+// Streams the microphone as 16 kHz PCM frames of 32 ms until closed. The
+// browser's echo cancellation and noise suppression clean up the signal
+// first; echo cancellation also keeps the assistant's own voice out of the
+// microphone as far as the browser manages (headphones work best).
+export async function openMicrophone(
+  onFrame: (pcm: Int16Array<ArrayBuffer>) => void,
+): Promise<Microphone> {
   if (typeof navigator.mediaDevices === 'undefined') {
     throw new Error('This browser offers no microphone here (it needs https or localhost).')
   }
@@ -18,10 +19,9 @@ export async function startRecording(): Promise<Recording> {
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   })
   const context = new AudioContext()
-  const chunks: Int16Array<ArrayBuffer>[] = []
   let node: AudioWorkletNode | null = null
 
-  const release = () => {
+  const close = () => {
     if (node) {
       node.port.onmessage = null
       node.port.close()
@@ -37,19 +37,14 @@ export async function startRecording(): Promise<Recording> {
     // Without outputs the node is still processed, and nothing is played
     node = new AudioWorkletNode(context, 'pcm-capture', { numberOfOutputs: 0 })
     node.port.onmessage = (event: MessageEvent<Int16Array<ArrayBuffer>>) => {
-      chunks.push(event.data)
+      onFrame(event.data)
     }
     context.createMediaStreamSource(stream).connect(node)
+    // A context created without a click on the page starts suspended
+    await context.resume()
   } catch (error) {
-    release()
+    close()
     throw error
   }
-
-  return {
-    stop: () => {
-      release()
-      return encodeWav(chunks)
-    },
-    cancel: release,
-  }
+  return { close }
 }

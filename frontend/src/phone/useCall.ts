@@ -1,194 +1,141 @@
 import { type RefObject, useEffect, useReducer, useRef } from 'react'
 
-import {
-  ApiError,
-  type Audio,
-  endConversation,
-  type InputVia,
-  sendRecording,
-  sendText,
-  startConversation,
-  type TurnResponse,
-} from '../api/conversations.ts'
-import { playClip, type Playing } from '../audio/playback.ts'
-import { type Recording, startRecording } from '../audio/recorder.ts'
+import { callUrl, type ClientMessage, parseServerMessage } from '../api/callProtocol.ts'
+import type { InputVia } from '../api/conversations.ts'
+import { type Microphone, openMicrophone } from '../audio/microphone.ts'
+import { ClipPlayer } from '../audio/playback.ts'
 import { callReducer, initialCallState } from './callState.ts'
-
-type Send = (conversationId: string, signal: AbortSignal) => Promise<TurnResponse>
 
 // What a running call holds on to, outside of React state
 interface Handles {
-  conversationId: string | null
-  request: AbortController | null
-  recording: Recording | null
-  recordingTimer: number | null
-  playing: Playing | null
+  socket: WebSocket | null
+  microphone: Microphone | null
+  player: ClipPlayer | null
+  muted: boolean
 }
 
-// Stops whatever is in progress: the request, the microphone, the audio
+function send(socket: WebSocket | null, message: ClientMessage) {
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(message))
+  }
+}
+
+// Stops whatever is in progress: the connection, the microphone, the audio
 function release(handles: RefObject<Handles>) {
   const current = handles.current
-  current.request?.abort()
-  current.request = null
-  if (current.recordingTimer !== null) {
-    window.clearTimeout(current.recordingTimer)
-    current.recordingTimer = null
+  const socket = current.socket
+  current.socket = null
+  if (socket) {
+    socket.onmessage = null
+    socket.onclose = null
+    socket.onopen = null
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      socket.close(1000)
+    }
   }
-  current.recording?.cancel()
-  current.recording = null
-  current.playing?.stop()
-  current.playing = null
+  current.microphone?.close()
+  current.microphone = null
+  current.player?.stop()
+  current.player = null
 }
 
-function describe(error: unknown): string {
-  if (error instanceof ApiError) {
-    return error.message
-  }
+function describeMicrophoneError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'NotAllowedError') {
     return 'The microphone is blocked. You can still type.'
   }
   if (error instanceof Error && error.message) {
-    return error.message
+    return `${error.message} You can still type.`
   }
-  return 'Something went wrong. Please try again.'
+  return 'The microphone is not available. You can still type.'
 }
 
-// A phone call with the backend: dial, talk or type turn by turn, hang up
-export function useCall(maxRecordingS: number) {
+// A live phone call with the backend over one WebSocket: the microphone
+// streams continuously, the backend notices when the caller stops talking,
+// and its answer plays sentence by sentence as it's written
+export function useCall() {
   const [state, dispatch] = useReducer(callReducer, initialCallState)
-  const handles = useRef<Handles>({
-    conversationId: null,
-    request: null,
-    recording: null,
-    recordingTimer: null,
-    playing: null,
-  })
+  const handles = useRef<Handles>({ socket: null, microphone: null, player: null, muted: false })
 
-  async function play(audio: Audio | null) {
-    if (audio) {
-      const playing = playClip(audio)
-      handles.current.playing = playing
-      await playing.done
-      handles.current.playing = null
-    }
-    dispatch({ type: 'played' })
-  }
-
-  async function start() {
-    const controller = new AbortController()
-    handles.current.request = controller
-    dispatch({ type: 'start' })
+  async function listen(socket: WebSocket) {
     try {
-      const started = await startConversation(controller.signal)
-      handles.current.conversationId = started.conversation.id
-      dispatch({
-        type: 'started',
-        conversationId: started.conversation.id,
-        greeting: started.greeting,
-        at: Date.now(),
+      const microphone = await openMicrophone((frame) => {
+        if (!handles.current.muted && socket.readyState === WebSocket.OPEN) {
+          socket.send(frame)
+        }
       })
-      await play(started.audio)
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        dispatch({ type: 'startFailed', notice: `Couldn't start the call. ${describe(error)}` })
-      }
-    }
-  }
-
-  async function turn(send: Send) {
-    const conversationId = handles.current.conversationId
-    if (conversationId === null) {
-      return
-    }
-    const controller = new AbortController()
-    handles.current.request = controller
-    dispatch({ type: 'sending' })
-    try {
-      const answer = await send(conversationId, controller.signal)
-      dispatch({ type: 'answered', user: answer.user_message, assistant: answer.assistant_message })
-      await play(answer.audio)
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        dispatch({ type: 'failed', notice: describe(error) })
-      }
-    }
-  }
-
-  function stopTalking() {
-    const current = handles.current
-    if (current.recordingTimer !== null) {
-      window.clearTimeout(current.recordingTimer)
-      current.recordingTimer = null
-    }
-    const recording = current.recording
-    if (recording === null) {
-      return
-    }
-    current.recording = null
-    const wav = recording.stop()
-    void turn((conversationId, signal) => sendRecording(conversationId, wav, signal))
-  }
-
-  async function talk() {
-    try {
-      const recording = await startRecording()
       // Hung up while the browser asked for the microphone
-      if (handles.current.conversationId === null) {
-        recording.cancel()
+      if (handles.current.socket !== socket) {
+        microphone.close()
         return
       }
-      handles.current.recording = recording
-      dispatch({ type: 'recording' })
-      // Stop shortly before the backend's limit, so the recording is accepted
-      handles.current.recordingTimer = window.setTimeout(
-        stopTalking,
-        Math.max(1, maxRecordingS - 0.5) * 1000,
-      )
+      handles.current.microphone = microphone
+      dispatch({ type: 'microphone', available: true })
     } catch (error) {
-      dispatch({ type: 'failed', notice: describe(error) })
+      if (handles.current.socket === socket) {
+        dispatch({ type: 'microphone', available: false, notice: describeMicrophoneError(error) })
+      }
     }
+  }
+
+  function start() {
+    release(handles)
+    dispatch({ type: 'dial' })
+    const socket = new WebSocket(callUrl())
+    const player = new ClipPlayer((clip) => {
+      send(socket, { type: 'played', clip })
+    })
+    handles.current = { socket, microphone: null, player, muted: false }
+
+    socket.onmessage = (event: MessageEvent) => {
+      if (typeof event.data !== 'string') {
+        return
+      }
+      const message = parseServerMessage(event.data)
+      if (message === null) {
+        return
+      }
+      if (message.type === 'audio') {
+        player.enqueue(message)
+      } else if (message.type === 'interrupted') {
+        player.stop()
+      }
+      dispatch({ type: 'received', message, at: Date.now() })
+      if (message.type === 'call_ended') {
+        release(handles)
+      }
+    }
+    socket.onclose = () => {
+      release(handles)
+      dispatch({ type: 'disconnected', at: Date.now() })
+    }
+    // Asked for at once, so the browser's prompt shows while the call connects
+    void listen(socket)
   }
 
   function type(text: string, via: InputVia) {
-    void turn((conversationId, signal) => sendText(conversationId, text, via, signal))
+    send(handles.current.socket, { type: 'text', text, via })
+  }
+
+  function toggleMute() {
+    const muted = !handles.current.muted
+    handles.current.muted = muted
+    send(handles.current.socket, { type: 'mute', muted })
+    dispatch({ type: 'muted', muted })
   }
 
   function hangUp() {
+    // Sent before the connection closes, so the call ends as hung up
+    send(handles.current.socket, { type: 'hangup' })
     release(handles)
-    const conversationId = handles.current.conversationId
-    handles.current.conversationId = null
-    if (conversationId !== null) {
-      // The backend waits for a running turn before it ends the call
-      endConversation(conversationId, 'hangup').catch(() => undefined)
-    }
     dispatch({ type: 'hungUp', at: Date.now() })
   }
 
   useEffect(() => {
-    // Closing the page ends the call too, as far as the browser still lets us
-    const onPageHide = () => {
-      const conversationId = handles.current.conversationId
-      if (conversationId !== null) {
-        navigator.sendBeacon(
-          `/api/conversations/${conversationId}/end`,
-          new Blob([JSON.stringify({ reason: 'page_closed' })], { type: 'application/json' }),
-        )
-      }
-    }
-    window.addEventListener('pagehide', onPageHide)
+    // Closing the page closes the connection, which ends the call
     return () => {
-      window.removeEventListener('pagehide', onPageHide)
-      // Free the microphone and stop the audio when the view goes away
       release(handles)
     }
   }, [])
 
-  return {
-    state,
-    start: () => void start(),
-    talk: () => void talk(),
-    stopTalking,
-    type,
-    hangUp,
-  }
+  return { state, start, type, toggleMute, hangUp }
 }

@@ -1,8 +1,9 @@
 # Voice Agent
 
-A minimal voice conversation app that works like a phone call. Press the green button to call, tap the microphone, speak, tap again and hear the answer. You can also type, or enter digits on the keypad. The red button hangs up. Every conversation is stored in PostgreSQL.
+A minimal voice conversation app that works like a phone call. Press the green button to call and just talk: the assistant notices when you pause, starts speaking its answer while it's still writing it, and stops when you talk over it. You can also type, or enter digits on the keypad. The red button hangs up. Every conversation is stored in PostgreSQL.
 
 - **Speech recognition:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (English `small.en` by default), on the CPU
+- **Turn detection:** the [Silero VAD](https://github.com/snakers4/silero-vad) model that faster-whisper ships, via ONNX Runtime
 - **Speech synthesis:** [Piper](https://github.com/OHF-Voice/piper1-gpl) (voice `en_US-lessac-medium` by default), on the CPU
 - **Language model:** [PydanticAI](https://ai.pydantic.dev/) with OpenAI, [Requesty](https://www.requesty.ai/) or [OpenRouter](https://openrouter.ai/). It answers plainly, with no tools or agent logic yet. The `echo` provider repeats the caller and needs no key.
 - **Storage:** PostgreSQL with SQLAlchemy and Alembic migrations
@@ -18,7 +19,7 @@ cp .env.example .env   # optional: choose a language model, see below
 make run               # production-like stack on http://localhost:8080
 ```
 
-Open http://localhost:8080. Browsers allow the microphone on `localhost`. The first start downloads about 520 MB of speech models into `backend/models`, which takes a minute or two; later starts reuse them.
+Open http://localhost:8080. Browsers allow the microphone on `localhost`. Use headphones if you can: the browser's echo cancellation keeps most of the assistant's voice out of the microphone, but what gets through can sound like you talking over it. The first start downloads about 520 MB of speech models into `backend/models`, which takes a minute or two; later starts reuse them.
 
 Without a `.env`, the app uses the `echo` provider: the whole voice loop works and the assistant repeats what you said. For real answers, set a provider, a model and its key in `.env`:
 
@@ -43,22 +44,23 @@ make clean # also remove the database volume and the built images (the models in
 
 ## How a call works
 
-One call is one conversation. Each turn is one HTTP request with one complete answer:
+A call is one WebSocket connection (`/api/call`), and one conversation. Connecting starts it, losing the connection ends it:
 
-1. **Green button.** `POST /api/conversations` creates the conversation and returns the spoken greeting.
-2. **Tap the mic, speak, tap again.** The browser records 16 kHz mono PCM (an AudioWorklet downsamples the microphone) and sends it as a WAV to `POST /api/conversations/{id}/turns/voice`. Recording stops on its own at the backend's limit (30 s by default).
+1. **Green button.** The browser connects and opens the microphone. The backend creates the conversation and speaks the greeting.
+2. **Just talk.** The browser streams the microphone continuously as 16 kHz mono PCM (an AudioWorklet downsamples it), in 32 ms frames. The backend scores each frame with Silero VAD: 160 ms of speech start an utterance, and a pause of 700 ms ends it.
 3. **The backend answers:**
-   - Whisper transcribes the recording.
-   - Silence or likely invented words (high no-speech probability) count as "nothing heard", and nothing is stored.
+   - Whisper transcribes the utterance. Silence or likely invented words (high no-speech probability) count as "nothing heard", and nothing is stored.
    - The caller's message is stored.
-   - The model answers with the recent conversation as history.
-   - Piper speaks the whole answer.
-   - The answer is stored with its stage timings and token usage.
-4. **Typing or the keypad** go to `POST /api/conversations/{id}/turns/text` instead. Keypad digits collect in the text box, and `#` sends them.
-5. **One thing at a time.** While an answer is pending or playing, the microphone, the text box and the keypad are disabled. A second turn would be refused (409).
-6. **Red button.** `POST /api/conversations/{id}/end` waits for a running turn, so the stored transcript is complete. Closing the tab ends the call too, as far as the browser allows (`page_closed`).
+   - The model streams its answer with the recent conversation as history; the text appears as it's written.
+   - Each finished sentence is spoken right away: Piper synthesizes sentence 1 while the model still writes sentence 2, and the browser plays the clips in order.
+   - The answer is stored once it has played, with its stage timings and token usage.
+4. **Talking over the answer** stops it: after 400 ms of speech the backend tells the browser to stop playing, cancels the model and the synthesis, and stores the answer as interrupted, with the part the caller heard (the clips the browser reported as played). The model's next prompt says what the caller heard. Shorter sounds such as "mhm", a cough or echo don't interrupt.
+5. **Typing or the keypad** work at any time. Keypad digits collect in the text box, and `#` sends them. What arrives while an answer is being worked on is answered next; speech that ends while the backend is still thinking joins the next turn.
+6. **Mute** stops sending the microphone. **Red button** hangs up. Closing the tab, losing the connection and the call limit (15 minutes) end the call too.
 
-If the model fails or isn't configured, a fixed reply is spoken instead, stored with the source `template`. If speech synthesis fails, the answer is still shown.
+If the model fails or isn't configured, a fixed reply is spoken instead, stored with the source `template`; what the model said before failing stays as an interrupted message. If speech synthesis fails, the answer is still shown.
+
+The backend decides the call's state and announces it: `listening`, `thinking` (from the end of the caller's turn) and `speaking` (from the first clip until the last one has played). A clip whose "played" message never arrives can't hold the call: playback counts as over 1.5 s after the clips' length.
 
 ### API
 
@@ -66,20 +68,45 @@ If the model fails or isn't configured, a fixed reply is spoken instead, stored 
 |---|---|
 | `GET /api/health` | Liveness, for the container health check |
 | `GET /api/status` | Database reachable, model in use, speech models, recording limit |
-| `POST /api/conversations` | Start a call: conversation, greeting and its audio |
+| `WS /api/call` | A live call, see below |
+| `POST /api/conversations` | Push-to-talk call over HTTP: conversation, greeting and its audio |
 | `POST /api/conversations/{id}/turns/voice` | A recording (`audio/wav`, 16 kHz mono 16-bit) → caller message, answer and audio |
 | `POST /api/conversations/{id}/turns/text` | Typed text or keypad digits (`{"text", "via"}`) → the same |
-| `POST /api/conversations/{id}/end` | Hang up (`{"reason": "hangup" \| "page_closed"}`); ending twice changes nothing |
+| `POST /api/conversations/{id}/end` | Hang up (`{"reason": "hangup" \| "page_closed"}`); waits for a running turn; ending twice changes nothing |
 | `GET /api/conversations`, `GET /api/conversations/{id}` | Stored conversations with their messages |
 
-Interactive docs: http://localhost:8000/docs in development mode.
+The HTTP conversation endpoints answer one complete request at a time, without streaming or turn detection. The page uses the WebSocket; the HTTP endpoints remain for scripts and tests. Interactive docs: http://localhost:8000/docs in development mode.
+
+The live call's messages ([protocol.py](backend/voice_agent/conversation/protocol.py), mirrored in [callProtocol.ts](frontend/src/api/callProtocol.ts)):
+
+| Direction | Message | Meaning |
+|---|---|---|
+| → | binary frame | Microphone audio: 16 kHz mono PCM16, little-endian, up to 64 KiB |
+| → | `{"type": "text", "text", "via"}` | Typed text (`keyboard`) or keypad digits (`keypad`) |
+| → | `{"type": "played", "clip"}` | A clip played to the end (or at least 90 % of it) |
+| → | `{"type": "mute", "muted"}` | Microphone muted or unmuted; muting drops a partly heard utterance |
+| → | `{"type": "hangup"}` | Red button |
+| ← | `call_started {conversation_id}` | First message |
+| ← | `state {state}` | `listening`, `thinking` or `speaking` |
+| ← | `caller_speech {active}` | The voice detection hears the caller start or stop talking |
+| ← | `user_message {id, text, source}` | The caller's stored message |
+| ← | `assistant_delta {turn, text}` | More of the answer, as the model writes it |
+| ← | `audio {clip, turn, text, duration_ms, wav_base64}` | One spoken sentence |
+| ← | `assistant_message {id, turn, text, source, interrupted}` | The stored answer |
+| ← | `interrupted {turn}` | The caller talked over the answer: stop playing, drop queued clips |
+| ← | `turn_done {turn, timings_ms}` | Stage timings of the turn |
+| ← | `error {code, message}` | `invalid_message`, `stt_failed` or `busy`; the call goes on |
+| ← | `call_ended {reason}` | Last message before the backend closes the connection |
+
+Only pages of this app may connect: a browser's `Origin` must match the `Host` (nginx and Vite pass it on). If the database isn't reachable, the backend closes the connection with code 1011; an oversized frame closes it with 1009.
 
 ### Stored data
 
-- **`conversations`:** start and end, end reason, and the configuration the call ran with (provider, model, speech recognition model, voice), so answers stay comparable across setups.
+- **`conversations`:** start and end, end reason (`hangup`, `page_closed`, `disconnect`, `timeout` or `error`), and the configuration the call ran with (provider, model, speech recognition model, voice), so answers stay comparable across setups.
 - **`messages`:** role, source and text for each message:
   - **Sources:** `voice`, `keyboard`, `keypad`, `llm` or `template`.
-  - **Timings in milliseconds:** speech recognition, model, synthesis and total.
+  - **Interrupted answers:** `interrupted`, and in `heard_text` the part the caller heard.
+  - **Timings in milliseconds:** for push-to-talk turns `stt`, `llm`, `tts` and `total`. For live calls `stt` (on the caller's message), `llm_first_token` and `llm_total` (from the request to the model's first text and to its end), and `first_audio` and `total` (from the end of the caller's turn to the first clip and to the last one).
   - **Recognition metrics:** audio length, average log probability, no-speech probability.
   - **Token usage** of the answer.
 
@@ -96,7 +123,7 @@ Audio is not stored.
 
 The backend container runs as the owner of the mounted `backend/models` folder ([entrypoint.sh](backend/entrypoint.sh)), usually you, so the downloaded models belong to you on the host.
 
-The backend is a single process on purpose. The speech models are loaded once at startup and warmed up. Only one recognition and one synthesis run at a time, so concurrent calls queue for the CPU.
+The backend is a single process on purpose. The speech models are loaded once at startup and warmed up. Only one recognition and one synthesis run at a time, so concurrent calls queue for the CPU. The state of a live call and the per-conversation turn locks live in memory.
 
 ## Development
 
@@ -109,7 +136,8 @@ make init         # install backend and frontend dependencies and the pre-commit
 make check        # format, lint (with fixes) and type-check backend and frontend
 make pre-commit   # run all pre-commit hooks on all files
 make test         # backend and frontend tests (storage in memory, no containers)
-make test-speech  # Piper speaks, Whisper listens: the real models (downloaded into backend/models if missing)
+make test-speech  # Piper speaks, the voice detection and Whisper listen: the real models (downloaded into backend/models if missing)
+make call-smoke   # a scripted live call against the running stack (args="--speak question.wav" speaks a 16 kHz WAV)
 ```
 
 ### Database migrations
@@ -121,23 +149,39 @@ make db-upgrade                           # apply migrations without restarting 
 make psql                                 # a psql shell on the dev database
 ```
 
-The tests keep the conversations in memory (`tests/fakes.py`) and need no database. The real PostgreSQL path is checked in CI: the containers job migrates a fresh database, checks that the models and the migrations agree (`alembic check`), and makes a call through the running stack.
+The tests keep the conversations in memory (`tests/fakes.py`) and need no database; live calls run over the test client's WebSocket with a fake voice detection (loud frames are speech). The real PostgreSQL path is checked in CI: the containers job migrates a fresh database, checks that the models and the migrations agree (`alembic check`), and makes a push-to-talk call and a live call through the running stack.
 
 ## Measured latency
 
-Warm turns on the development machine (28 CPU threads), for a 3.8 s spoken question:
+Push-to-talk turns, warm, on the development machine (28 CPU threads), for a 3.8 s spoken question:
 
 | Model | Speech recognition | Model | Speech synthesis | Whole turn |
 |---|---|---|---|---|
 | `echo` | 0.74 s | – | 0.05 s | 0.8 s |
 | Requesty `azure/gpt-4.1-mini@francecentral` (EU router) | 0.85 s | 0.96 s | 0.10 s | 1.9 s |
 
-A reasoning model such as `gpt-5-mini` took about 4 s for its answer alone. These are single manual measurements, not a benchmark. Each stored message carries its own timings.
+A reasoning model such as `gpt-5-mini` took about 4 s for its answer alone.
+
+Live calls, `echo`, for a 2.3 s spoken question streamed in real time (`make call-smoke args="--speak ..."`, three calls):
+
+| Stage | Time |
+|---|---|
+| Pause until the turn ends (`VOICE_AGENT_VAD_SILENCE_MS`) | 0.7 s |
+| Speech recognition | 0.60–0.64 s |
+| Model's first text, first sentence synthesized and sent (`first_audio` − `stt`) | 0.05 s |
+| **End of the recording → first audio, as the caller hears it** | **1.18–1.23 s** |
+
+The recording ends with Piper's own trailing silence of about 0.2 s, which already counts toward the pause, so the stages add up to a bit more than the measured total.
+
+Compared with push-to-talk, the caller no longer taps, but waits for the 0.7 s pause instead. In exchange, speech starts after the model's first sentence rather than after the whole answer and its synthesis: with a real model, the first audio comes at about `stt` + time to the model's first sentence + one sentence of synthesis (about 0.05–0.1 s), however long the answer is. The live-call numbers with a hosted model are still to be measured.
+
+These are single manual measurements, not a benchmark. Each stored message carries its own timings.
 
 ## Limits
 
-- Push-to-talk only. The caller can't talk over the assistant, and turns aren't detected automatically yet.
-- The whole answer is generated before speech starts. There is no streaming yet.
+- Echo: without headphones, the assistant's voice can reach the microphone. Short echo is ignored, but loud speakers can interrupt the assistant with its own voice.
+- The recognizer only starts when the caller's turn has ended; there is no partial (streaming) speech recognition.
+- A call that loses its connection can't be resumed: it has ended, like a phone call.
 - No login: the app is published on `localhost` only.
 - One backend process; per-conversation turn locks live in memory.
 - English only.

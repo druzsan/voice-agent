@@ -1,4 +1,4 @@
-// The backend's recording format: 16 kHz mono 16-bit PCM in a WAV file
+// The backend's audio format: 16 kHz mono 16-bit PCM
 export const SAMPLE_RATE = 16000
 
 // Turns microphone samples at the device rate into 16 kHz PCM. Each output
@@ -38,31 +38,34 @@ export class Downsampler {
   }
 }
 
-// Little-endian PCM in a WAV container (Int16Array is little-endian on all
-// platforms browsers run on)
-export function encodeWav(
-  chunks: readonly Int16Array<ArrayBuffer>[],
-  sampleRate = SAMPLE_RATE,
-): Blob {
-  const samples = chunks.reduce((total, chunk) => total + chunk.length, 0)
-  const header = new DataView(new ArrayBuffer(44))
-  const text = (offset: number, value: string) => {
-    for (let index = 0; index < value.length; index += 1) {
-      header.setUint8(offset + index, value.charCodeAt(index))
-    }
+// Cuts PCM into frames of a fixed number of samples, like the backend's
+// voice detection scores them (512 samples, 32 ms)
+export const FRAME_SAMPLES = 512
+
+export class Framer {
+  private readonly size: number
+  private frame: Int16Array<ArrayBuffer>
+  private filled = 0
+
+  constructor(size = FRAME_SAMPLES) {
+    this.size = size
+    this.frame = new Int16Array(size)
   }
-  text(0, 'RIFF')
-  header.setUint32(4, 36 + samples * 2, true)
-  text(8, 'WAVE')
-  text(12, 'fmt ')
-  header.setUint32(16, 16, true) // fmt chunk size
-  header.setUint16(20, 1, true) // PCM
-  header.setUint16(22, 1, true) // mono
-  header.setUint32(24, sampleRate, true)
-  header.setUint32(28, sampleRate * 2, true) // bytes per second
-  header.setUint16(32, 2, true) // bytes per frame
-  header.setUint16(34, 16, true) // bits per sample
-  text(36, 'data')
-  header.setUint32(40, samples * 2, true)
-  return new Blob([header, ...chunks], { type: 'audio/wav' })
+
+  push(samples: Int16Array): Int16Array<ArrayBuffer>[] {
+    const frames: Int16Array<ArrayBuffer>[] = []
+    let offset = 0
+    while (offset < samples.length) {
+      const taken = Math.min(this.size - this.filled, samples.length - offset)
+      this.frame.set(samples.subarray(offset, offset + taken), this.filled)
+      this.filled += taken
+      offset += taken
+      if (this.filled === this.size) {
+        frames.push(this.frame)
+        this.frame = new Int16Array(this.size)
+        this.filled = 0
+      }
+    }
+    return frames
+  }
 }

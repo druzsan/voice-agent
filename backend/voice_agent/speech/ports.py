@@ -26,7 +26,15 @@ class AudioClip:
 
 
 class SpeechRecognizer(Protocol):
-    async def transcribe(self, samples: Samples) -> Transcript: ...
+    async def transcribe(
+        self, samples: Samples, *, trim_silence: bool = True
+    ) -> Transcript:
+        """Recognize English speech.
+
+        trim_silence drops silence around the words first; live calls turn
+        it off, because their utterances are already cut at the speech.
+        """
+        ...
 
 
 class SpeechSynthesizer(Protocol):

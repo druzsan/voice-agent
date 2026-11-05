@@ -4,11 +4,13 @@ from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Identity,
     Index,
     Text,
+    false,
     func,
     text,
 )
@@ -60,3 +62,5 @@ class MessageRow(Base):
     timings_ms: Mapped[dict[str, int] | None]
     stt: Mapped[dict[str, Any] | None]
     llm_usage: Mapped[dict[str, int] | None]
+    interrupted: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    heard_text: Mapped[str | None] = mapped_column(Text)

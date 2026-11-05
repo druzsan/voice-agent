@@ -14,14 +14,12 @@ import { useEffect, useState } from 'react'
 
 import { fetchStatus, type InputVia, type Status } from '../api/conversations.ts'
 import { playKeyTone } from '../audio/playback.ts'
-import { isInCall, type Phase } from './callState.ts'
-import { HangUpIcon, KeypadIcon, MicIcon, PhoneIcon, SendIcon, StopIcon } from './icons.tsx'
+import { type CallState, isInCall, type Phase } from './callState.ts'
+import { HangUpIcon, KeypadIcon, MicIcon, MicOffIcon, PhoneIcon, SendIcon } from './icons.tsx'
 import { Keypad } from './Keypad.tsx'
 import classes from './Phone.module.css'
 import { Transcript } from './Transcript.tsx'
 import { useCall } from './useCall.ts'
-
-const DEFAULT_MAX_RECORDING_S = 30
 
 function clock(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000))
@@ -30,12 +28,28 @@ function clock(milliseconds: number): string {
 
 const PHASE_LABELS: Record<Phase, string> = {
   idle: '',
-  starting: 'Calling…',
-  ready: 'Tap the mic to talk',
-  recording: 'Listening… tap again to send',
-  waiting: 'Thinking…',
-  playing: 'Speaking…',
+  connecting: 'Calling…',
+  listening: 'Listening…',
+  thinking: 'Thinking…',
+  speaking: 'Speaking… talk to interrupt',
   ended: 'Call ended',
+}
+
+function describeCall({ phase, muted, callerSpeaking, microphone }: CallState): string {
+  if (!isInCall(phase)) {
+    return PHASE_LABELS[phase]
+  }
+  if (microphone === 'unavailable') {
+    return phase === 'listening'
+      ? 'Type a message'
+      : PHASE_LABELS[phase].replace(' talk to interrupt', '')
+  }
+  if (muted) {
+    return phase === 'listening'
+      ? 'Muted'
+      : `${PHASE_LABELS[phase].replace(' talk to interrupt', '')} (muted)`
+  }
+  return callerSpeaking ? 'Hearing you…' : PHASE_LABELS[phase]
 }
 
 function describeModel(status: Status | null): string {
@@ -85,26 +99,26 @@ function useStatus() {
 
 export function Phone() {
   const { status, unreachable } = useStatus()
-  const call = useCall(status?.stt.max_recording_s ?? DEFAULT_MAX_RECORDING_S)
-  const { phase, messages, startedAt, endedAt, notice } = call.state
-  const [draft, setDraft] = useState('')
+  const call = useCall()
+  const { phase, messages, draft, startedAt, endedAt, notice, muted, callerSpeaking, microphone } =
+    call.state
+  const [composer, setComposer] = useState('')
   // Keypad input is stored as such, unless the caller also typed
-  const [draftVia, setDraftVia] = useState<InputVia>('keyboard')
+  const [composerVia, setComposerVia] = useState<InputVia>('keyboard')
   const [keypadOpen, setKeypadOpen] = useState(false)
 
   const inCall = isInCall(phase)
-  const ready = phase === 'ready'
   const now = useNow(inCall)
-  const [recordingSince, setRecordingSince] = useState(0)
 
-  function send(text = draft, via = draftVia) {
+  // Typing works at any time; the backend answers in order
+  function send(text = composer, via = composerVia) {
     const trimmed = text.trim()
-    if (!ready || trimmed === '') {
+    if (!inCall || trimmed === '') {
       return
     }
     call.type(trimmed, via)
-    setDraft('')
-    setDraftVia('keyboard')
+    setComposer('')
+    setComposerVia('keyboard')
   }
 
   function pressKey(key: string) {
@@ -113,27 +127,16 @@ export function Phone() {
       send()
       return
     }
-    setDraft((previous) => previous + key)
-    if (draft === '') {
-      setDraftVia('keypad')
-    }
-  }
-
-  function toggleTalking() {
-    if (phase === 'recording') {
-      call.stopTalking()
-    } else {
-      setRecordingSince(Date.now())
-      call.talk()
+    setComposer((previous) => previous + key)
+    if (composer === '') {
+      setComposerVia('keypad')
     }
   }
 
   const duration =
     startedAt === null ? '' : clock((phase === 'ended' && endedAt ? endedAt : now) - startedAt)
-  const statusLine =
-    phase === 'recording'
-      ? `${PHASE_LABELS.recording} (${clock(now - recordingSince)})`
-      : PHASE_LABELS[phase]
+  const statusLine = describeCall(call.state)
+  const showsCall = inCall || phase === 'ended'
 
   return (
     <Center mih="100dvh" p={{ base: 0, xs: 'md' }}>
@@ -143,11 +146,11 @@ export function Phone() {
             Voice Agent
           </Title>
           <Text fz="xs" c="dimmed">
-            {inCall || phase === 'ended' ? `${duration} · ${statusLine}` : describeModel(status)}
+            {showsCall ? `${duration} · ${statusLine}` : describeModel(status)}
           </Text>
         </Box>
 
-        {phase === 'idle' || phase === 'starting' ? (
+        {!showsCall ? (
           <Center flex={1}>
             <Stack align="center" gap="md" px="lg">
               <ActionIcon
@@ -156,14 +159,14 @@ export function Phone() {
                 color="green"
                 variant="filled"
                 aria-label="Start call"
-                loading={phase === 'starting'}
+                loading={phase === 'connecting'}
                 disabled={unreachable}
                 onClick={call.start}
               >
                 <PhoneIcon size={38} />
               </ActionIcon>
               <Text fz="sm" c="dimmed" ta="center">
-                {phase === 'starting' ? PHASE_LABELS.starting : 'Tap to call'}
+                {phase === 'connecting' ? PHASE_LABELS.connecting : 'Tap to call'}
               </Text>
               {unreachable && (
                 <Alert color="red" variant="light">
@@ -183,10 +186,14 @@ export function Phone() {
             </Stack>
           </Center>
         ) : (
-          <Transcript messages={messages} waiting={phase === 'waiting'} />
+          <Transcript
+            messages={messages}
+            draft={draft?.text ?? null}
+            waiting={phase === 'thinking' && messages.length > 0}
+          />
         )}
 
-        {(inCall || phase === 'ended') && (
+        {showsCall && (
           <Stack gap="sm" className={classes['footer']}>
             {notice && (
               <Text fz="sm" c="orange" ta="center" role="status">
@@ -199,13 +206,12 @@ export function Phone() {
                   <TextInput
                     flex={1}
                     radius="xl"
-                    placeholder={ready ? 'Type a message…' : 'Wait for the answer…'}
+                    placeholder="Type a message…"
                     aria-label="Message"
-                    value={draft}
-                    disabled={!ready}
+                    value={composer}
                     onChange={(event) => {
-                      setDraft(event.currentTarget.value)
-                      setDraftVia('keyboard')
+                      setComposer(event.currentTarget.value)
+                      setComposerVia('keyboard')
                     }}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') {
@@ -217,7 +223,7 @@ export function Phone() {
                     size="lg"
                     radius="xl"
                     aria-label="Send message"
-                    disabled={!ready || draft.trim() === ''}
+                    disabled={composer.trim() === ''}
                     onClick={() => {
                       send()
                     }}
@@ -225,7 +231,7 @@ export function Phone() {
                     <SendIcon size={18} />
                   </ActionIcon>
                 </Group>
-                {keypadOpen && <Keypad onKey={pressKey} disabled={!ready} />}
+                {keypadOpen && <Keypad onKey={pressKey} />}
                 <Group justify="space-evenly" mt="xs">
                   <Tooltip label={keypadOpen ? 'Hide keypad' : 'Show keypad'}>
                     <ActionIcon
@@ -242,18 +248,25 @@ export function Phone() {
                       <KeypadIcon />
                     </ActionIcon>
                   </Tooltip>
-                  <ActionIcon
-                    size={64}
-                    radius="100%"
-                    variant="filled"
-                    color={phase === 'recording' ? 'red' : 'blue'}
-                    className={phase === 'recording' ? classes['recording'] : undefined}
-                    aria-label={phase === 'recording' ? 'Stop and send' : 'Talk'}
-                    disabled={!ready && phase !== 'recording'}
-                    onClick={toggleTalking}
-                  >
-                    {phase === 'recording' ? <StopIcon size={28} /> : <MicIcon size={28} />}
-                  </ActionIcon>
+                  <Tooltip label={muted ? 'Unmute' : 'Mute'}>
+                    <ActionIcon
+                      size={64}
+                      radius="100%"
+                      variant="filled"
+                      color={muted || microphone === 'unavailable' ? 'gray' : 'blue'}
+                      className={callerSpeaking && !muted ? classes['hearing'] : undefined}
+                      aria-label={muted ? 'Unmute' : 'Mute'}
+                      aria-pressed={muted}
+                      disabled={microphone !== 'on'}
+                      onClick={call.toggleMute}
+                    >
+                      {muted || microphone === 'unavailable' ? (
+                        <MicOffIcon size={28} />
+                      ) : (
+                        <MicIcon size={28} />
+                      )}
+                    </ActionIcon>
+                  </Tooltip>
                   <ActionIcon
                     size={56}
                     radius="100%"

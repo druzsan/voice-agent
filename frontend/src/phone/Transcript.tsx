@@ -1,7 +1,8 @@
 import { Box, Group, Loader, ScrollArea, Stack, Text } from '@mantine/core'
 import { useEffect, useRef } from 'react'
 
-import type { Message, Source } from '../api/conversations.ts'
+import type { Source } from '../api/conversations.ts'
+import type { TranscriptEntry } from './callState.ts'
 import { KeyboardIcon, KeypadIcon, MicIcon } from './icons.tsx'
 import classes from './Phone.module.css'
 
@@ -27,17 +28,19 @@ function SourceIcon({ source }: { source: Source }) {
 }
 
 interface TranscriptProps {
-  messages: readonly Message[]
+  messages: readonly TranscriptEntry[]
+  // The reply as the model writes it
+  draft: string | null
   waiting: boolean
 }
 
-export function Transcript({ messages, waiting }: TranscriptProps) {
+export function Transcript({ messages, draft, waiting }: TranscriptProps) {
   const viewport = useRef<HTMLDivElement>(null)
 
   // Keep the newest message in view
   useEffect(() => {
     viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: 'smooth' })
-  }, [messages.length, waiting])
+  }, [messages.length, draft, waiting])
 
   return (
     <ScrollArea className={classes['transcript']} viewportRef={viewport} type="auto">
@@ -52,11 +55,19 @@ export function Transcript({ messages, waiting }: TranscriptProps) {
             <Text fz="sm">{message.text}</Text>
             <Group gap={4} mt={2} className={classes['meta']}>
               <SourceIcon source={message.source} />
-              <Text fz={10}>{SOURCE_LABELS[message.source]}</Text>
+              <Text fz={10}>
+                {SOURCE_LABELS[message.source]}
+                {message.interrupted && ' · interrupted'}
+              </Text>
             </Group>
           </Box>
         ))}
-        {waiting && (
+        {draft !== null && (
+          <Box className={classes['bubble']} data-role="assistant" aria-label="Answer so far">
+            <Text fz="sm">{draft.trim()}</Text>
+          </Box>
+        )}
+        {waiting && draft === null && (
           <Box className={classes['bubble']} data-role="assistant" aria-label="Answering">
             <Loader type="dots" size="sm" />
           </Box>

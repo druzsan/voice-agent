@@ -49,10 +49,11 @@ export function MicIcon(props: IconProps) {
   )
 }
 
-export function StopIcon(props: IconProps) {
+export function MicOffIcon(props: IconProps) {
   return (
     <Icon {...props}>
-      <rect x="6" y="6" width="12" height="12" rx="2" />
+      <path d="M9 9V5a3 3 0 0 1 5.7-1.3M15 10v1a3 3 0 0 1-4.6 2.5" />
+      <path d="M5 10a7 7 0 0 0 11.2 5.6M19 10a7 7 0 0 1-.6 2.8M12 17v4M8 21h8M3 3l18 18" />
     </Icon>
   )
 }

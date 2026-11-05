@@ -191,6 +191,17 @@ jobs:
           curl -fsS -X POST "http://127.0.0.1:8080/api/conversations/$id/end"
           curl -fsS "http://127.0.0.1:8080/api/conversations/$id" | jq -e '.end_reason == "hangup" and (.messages | length) == 3'
 
+      # A live call over the WebSocket, through the frontend as well: the
+      # greeting, a typed turn spoken sentence by sentence, hanging up
+      - name: Live call smoke test
+        run: |
+          docker compose run --rm --no-deps --volume ./backend/scripts:/app/scripts:ro \
+            backend python -m scripts.call_smoke ws://frontend:8080/api/call --expect "You said: Hello CI" \
+            | tee call.log
+          id=$(sed -n 's/^Conversation //p' call.log)
+          curl -fsS "http://127.0.0.1:8080/api/conversations/$id" \
+            | jq -e '.end_reason == "hangup" and ([.messages[].role] == ["assistant", "user", "assistant"])'
+
       - if: failure()
         run: docker compose logs
       - if: always()

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import anyio
+import numpy as np
 
 from voice_agent.conversation.records import (
     CallSetup,
@@ -16,6 +17,7 @@ from voice_agent.conversation.records import (
 )
 from voice_agent.speech.audio import SAMPLE_RATE, write_wav
 from voice_agent.speech.ports import AudioClip, Samples, Transcript
+from voice_agent.speech.vad import FRAME_SAMPLES, SpeechProbability
 
 
 class InMemoryConversationRepository:
@@ -104,13 +106,20 @@ class FakeRecognizer:
         self.no_speech_prob = 0.05
         self.avg_logprob = -0.2
         self.heard: list[Samples] = []
+        self.trimmed: list[bool] = []
+        self.fail = False
         # Set to hold a recognition until the test releases it
         self.release: anyio.Event | None = None
 
-    async def transcribe(self, samples: Samples) -> Transcript:
+    async def transcribe(
+        self, samples: Samples, *, trim_silence: bool = True
+    ) -> Transcript:
         self.heard.append(samples)
+        self.trimmed.append(trim_silence)
         if self.release is not None:
             await self.release.wait()
+        if self.fail:
+            raise RuntimeError("recognition failed")
         return Transcript(
             text=self.text,
             audio_ms=round(len(samples) / SAMPLE_RATE * 1000),
@@ -131,3 +140,20 @@ class FakeSynthesizer:
         return AudioClip(
             wav=wav_of_silence(0.1), sample_rate=SAMPLE_RATE, duration_ms=100
         )
+
+
+class FakeVad:
+    """Loud frames are speech, quiet ones silence."""
+
+    def stream(self) -> SpeechProbability:
+        def probability(frame: Samples) -> float:
+            return 1.0 if float(np.abs(frame).mean()) > 0.1 else 0.0
+
+        return probability
+
+
+def pcm(seconds: float, *, loud: bool) -> bytes:
+    """Microphone audio for FakeVad: speech when loud, else silence."""
+    frames = round(seconds * SAMPLE_RATE / FRAME_SAMPLES)
+    sample = 16_000 if loud else 0
+    return np.full(frames * FRAME_SAMPLES, sample, dtype="<i2").tobytes()

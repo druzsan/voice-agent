@@ -85,18 +85,19 @@
   }
 }
 
-.recording {
+/* The caller is talking */
+.hearing {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
 @keyframes pulse {
   50% {
-    box-shadow: 0 0 0 10px rgb(250 82 82 / 0.15);
+    box-shadow: 0 0 0 10px rgb(34 139 230 / 0.2);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .recording {
+  .hearing {
     animation: none;
   }
 }

@@ -1,17 +1,23 @@
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from pydantic_ai.messages import ModelRequest, ModelResponse
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    UserPromptPart,
+)
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
 from voice_agent.config import LlmProvider, Settings
 from voice_agent.conversation.records import Message, Role, Source
 from voice_agent.llm.prompts import LLM_NOT_CONFIGURED
-from voice_agent.llm.providers import build_model
-from voice_agent.llm.responder import Responder, to_model_history
+from voice_agent.llm.providers import build_model, echo_model
+from voice_agent.llm.responder import Responder, StreamedReply, to_model_history
 
 pytestmark = pytest.mark.anyio
 
@@ -80,7 +86,13 @@ async def test_an_unconfigured_model_gets_a_fixed_reply() -> None:
     assert reply.source == "template"
 
 
-def message(role: Role, source: Source, text: str) -> Message:
+def message(
+    role: Role,
+    source: Source,
+    text: str,
+    interrupted: bool = False,
+    heard_text: str | None = None,
+) -> Message:
     return Message(
         id=1,
         conversation_id=uuid4(),
@@ -88,6 +100,8 @@ def message(role: Role, source: Source, text: str) -> Message:
         role=role,
         source=source,
         text=text,
+        interrupted=interrupted,
+        heard_text=heard_text,
     )
 
 
@@ -103,3 +117,81 @@ def test_history_leaves_out_fixed_texts() -> None:
     )
 
     assert [type(m) for m in history] == [ModelRequest, ModelResponse, ModelRequest]
+
+
+def prompts(history: list[ModelMessage]) -> list[list[str]]:
+    return [
+        [
+            part.content
+            for part in message.parts
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str)
+        ]
+        for message in history
+        if isinstance(message, ModelRequest)
+    ]
+
+
+def test_after_an_interrupted_reply_the_model_learns_what_was_heard() -> None:
+    history = to_model_history(
+        [
+            message("user", "voice", "Tell me a story"),
+            message(
+                "assistant",
+                "llm",
+                "Once upon a time. There was a king.",
+                interrupted=True,
+                heard_text="Once upon a time.",
+            ),
+        ],
+        "Wait, a short one",
+    )
+
+    assert prompts(history) == [
+        ["Tell me a story"],
+        [
+            "(You were interrupted. The caller heard only: 'Once upon a time.')",
+            "Wait, a short one",
+        ],
+    ]
+
+
+async def collect(responder: Responder) -> tuple[list[str], StreamedReply]:
+    deltas: list[str] = []
+
+    async def on_text(delta: str) -> None:
+        deltas.append(delta)
+
+    reply = await responder.stream([], "Hi there", on_text)
+    return deltas, reply
+
+
+async def test_a_streamed_reply_arrives_piece_by_piece() -> None:
+    deltas, reply = await collect(Responder(echo_model(), timeout_s=1, max_tokens=10))
+
+    assert deltas == ["You ", "said: ", "Hi ", "there "]
+    assert (reply.text, reply.source, reply.failed) == (
+        "You said: Hi there",
+        "llm",
+        False,
+    )
+    assert reply.usage is not None and reply.usage["requests"] == 1
+    assert reply.first_token_ms is not None
+
+
+async def test_a_stream_that_breaks_keeps_its_beginning() -> None:
+    async def breaking(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> AsyncIterator[str]:
+        yield "Well, "
+        raise RuntimeError("provider down")
+
+    _, reply = await collect(Responder(FunctionModel(stream_function=breaking), 1, 10))
+
+    assert (reply.text, reply.failed) == ("Well,", True)
+
+
+async def test_an_unconfigured_model_streams_a_fixed_reply() -> None:
+    deltas, reply = await collect(Responder(None, timeout_s=1, max_tokens=10))
+
+    assert deltas == [LLM_NOT_CONFIGURED]
+    assert reply.source == "template"
