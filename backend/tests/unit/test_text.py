@@ -53,3 +53,16 @@ def test_sentences_end_where_english_ends_them(text: str, expected: list[str]) -
     # Character by character, like the smallest stream deltas
     assert sentences(*text) == expected
     assert sentences(text) == expected
+
+
+def test_german_ordinals_and_abbreviations_dont_end_a_sentence() -> None:
+    buffer = SentenceBuffer()
+
+    sentences = buffer.push(
+        "Ihr Termin ist am 10. November bestätigt. Bringen Sie z. B. den Ausweis mit. "
+    )
+
+    assert sentences == [
+        "Ihr Termin ist am 10. November bestätigt.",
+        "Bringen Sie z. B. den Ausweis mit.",
+    ]

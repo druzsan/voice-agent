@@ -43,11 +43,13 @@ typeCheckingMode = "strict"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 # The speech tests need the real models (downloaded on the first run); the
-# OpenAI tests an API key, and they cost a few cents
-addopts = ["-m", "not speech and not openai"]
+# OpenAI tests an API key, and they cost a few cents; the db tests the dev
+# database server
+addopts = ["-m", "not speech and not openai and not db"]
 markers = [
     "speech: needs the real speech models (run them with `make test-speech`)",
     "openai: calls OpenAI's speech models (run them with `make test-openai`)",
+    "db: needs the dev database server (run them with `make test-db`)",
 ]
 
 

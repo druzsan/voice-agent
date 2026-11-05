@@ -78,10 +78,11 @@ export function useCall() {
     }
   }
 
-  function start() {
+  // `phone`: the number the caller dials from, as the line reports it
+  function start(phone?: string) {
     release(handles)
     dispatch({ type: 'dial' })
-    const socket = new WebSocket(callUrl())
+    const socket = new WebSocket(callUrl(phone))
     const player = new ClipPlayer((clip) => {
       send(socket, { type: 'played', clip })
     })
@@ -132,6 +133,11 @@ export function useCall() {
     dispatch({ type: 'muted', muted })
   }
 
+  // Picks the call up again after the transfer put it on hold
+  function resume() {
+    send(handles.current.socket, { type: 'resume' })
+  }
+
   function hangUp() {
     // Sent before the connection closes, so the call ends as hung up
     send(handles.current.socket, { type: 'hangup' })
@@ -146,5 +152,5 @@ export function useCall() {
     }
   }, [])
 
-  return { state, start, type, toggleMute, hangUp }
+  return { state, start, type, toggleMute, resume, hangUp }
 }

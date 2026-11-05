@@ -10,8 +10,11 @@ import asyncio
 import sys
 import time
 
+from voice_agent.agent.deps import CallDeps
+from voice_agent.agent.state import CallState
 from voice_agent.config import Settings
-from voice_agent.services import build_responder
+from voice_agent.crm.memory import InMemoryCrm
+from voice_agent.services import build_responder, carrie_settings
 
 
 async def main(question: str) -> int:
@@ -22,7 +25,14 @@ async def main(question: str) -> int:
         print("The language model is not configured; see the warnings above.")
         return 1
     start = time.perf_counter()
-    reply = await responder.reply([], question)
+    # Carrie with the starting data in memory: no database needed
+    deps = CallDeps(
+        state=CallState(),
+        crm=InMemoryCrm.seeded(),
+        settings=carrie_settings(settings),
+        conversation_id=None,
+    )
+    reply = await responder.reply([], question, deps)
     elapsed = time.perf_counter() - start
     print(f"Reply ({reply.source}, {elapsed:.2f} s): {reply.text}")
     print(f"Usage: {reply.usage}")

@@ -16,7 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from voice_agent.conversation.records import EndReason, Role, Source
+from voice_agent.conversation.records import EndReason, FeedbackRating, Role, Source
 from voice_agent.db.base import Base
 
 
@@ -29,6 +29,10 @@ class ConversationRow(Base):
     __tablename__ = "conversations"
     __table_args__ = (
         CheckConstraint(_one_of("end_reason", get_args(EndReason)), name="end_reason"),
+        CheckConstraint(
+            _one_of("feedback_rating", get_args(FeedbackRating)),
+            name="feedback_rating",
+        ),
     )
 
     # Time-ordered UUIDs (built into PostgreSQL 18)
@@ -41,6 +45,16 @@ class ConversationRow(Base):
     llm_model: Mapped[str | None] = mapped_column(Text)
     stt_model: Mapped[str] = mapped_column(Text)
     tts_voice: Mapped[str] = mapped_column(Text)
+    # The caller's number as the phone line reports it (E.164)
+    caller_phone: Mapped[str | None] = mapped_column(Text)
+    # The language the conversation is held in now (en, de)
+    language: Mapped[str | None] = mapped_column(Text)
+    # The agent's call state (voice_agent.agent.state.CallState)
+    state: Mapped[dict[str, Any] | None]
+    # The caller's feedback on the call: up or down, and an optional comment
+    feedback_rating: Mapped[str | None] = mapped_column(Text)
+    feedback_comment: Mapped[str | None] = mapped_column(Text)
+    feedback_at: Mapped[datetime | None]
 
 
 class MessageRow(Base):
@@ -66,3 +80,8 @@ class MessageRow(Base):
     usage: Mapped[list[dict[str, Any]] | None]
     interrupted: Mapped[bool] = mapped_column(Boolean, server_default=false())
     heard_text: Mapped[str | None] = mapped_column(Text)
+    # The model's messages of the turn, tool calls and results included
+    # (PydanticAI's JSON), replayed as the conversation history
+    model_messages: Mapped[list[dict[str, Any]] | None]
+    # The turn's tool calls, for the transcript: name, result status, label
+    tool_calls: Mapped[list[dict[str, Any]] | None]

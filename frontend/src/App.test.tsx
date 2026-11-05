@@ -44,6 +44,7 @@ vi.mock('./audio/microphone.ts', () => ({
 
 const status: Status = {
   database: 'ok',
+  languages: ['en', 'de'],
   llm: { provider: 'requesty', model: 'azure/gpt-4.1-mini', configured: true },
   stt: {
     provider: 'openai',
@@ -127,7 +128,13 @@ async function dial(): Promise<FakeSocket> {
     socket.open()
   })
   socket.push(
-    { type: 'call_started', conversation_id: 'c1' },
+    {
+      type: 'call_started',
+      conversation_id: 'c1',
+      caller_phone: '+4915112345678',
+      language: 'en',
+      supported_languages: ['en', 'de'],
+    },
     { type: 'state', state: 'speaking' },
     { type: 'assistant_delta', turn: 1, text: greeting },
     { type: 'audio', clip: 1, turn: 1, sample_rate: 24000, pcm_base64: 'AAAA' },
@@ -169,7 +176,8 @@ describe('Phone', () => {
     renderApp()
     const socket = await dial()
 
-    expect(socket.url).toBe('ws://localhost:3000/api/call')
+    // From a random German mobile number
+    expect(socket.url).toMatch(/^ws:\/\/localhost:3000\/api\/call\?phone=%2B49%201\d{2}%20\d{8}$/)
     expect(socket.messages()).toEqual([{ type: 'played', clip: 1 }])
     expect(await screen.findByText(/Listening…/)).toBeInTheDocument()
   })
@@ -338,5 +346,159 @@ describe('Phone', () => {
 
     expect(await screen.findByText(/backend is not reachable/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Start call' })).toBeDisabled()
+  })
+
+  it('calls from the number the caller typed', async () => {
+    renderApp()
+    const number = await screen.findByRole('textbox', { name: 'Your phone number' })
+    await userEvent.clear(number)
+    await userEvent.type(number, '+49 151 22000201')
+
+    const socket = await dial()
+
+    expect(socket.url).toBe('ws://localhost:3000/api/call?phone=%2B49%20151%2022000201')
+  })
+
+  it("can't call from a number that isn't German", async () => {
+    renderApp()
+    const number = await screen.findByRole('textbox', { name: 'Your phone number' })
+    await userEvent.clear(number)
+    await userEvent.type(number, '+44 20 7946 0958')
+
+    expect(screen.getByRole('button', { name: 'Start call' })).toBeDisabled()
+  })
+
+  it('shows the tools Carrie used and the conversation language', async () => {
+    renderApp()
+    const socket = await dial()
+
+    socket.push(
+      { type: 'user_message', id: 2, text: 'Wann kommt mein Auto?', source: 'voice' },
+      { type: 'language', language: 'de' },
+      {
+        type: 'tool',
+        turn: 2,
+        name: 'lookup_order',
+        status: 'ok',
+        label: 'Order 456789 verified',
+        data: {},
+      },
+    )
+
+    expect(await screen.findByText(/Order 456789 verified/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Conversation language')).toHaveTextContent('DE')
+  })
+
+  it('waits on hold after a transfer until the caller continues', async () => {
+    renderApp()
+    const socket = await dial()
+
+    socket.push({ type: 'state', state: 'on_hold' })
+    const hold = await screen.findByRole('button', { name: 'On hold, continue talking' })
+    expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument()
+    await userEvent.click(hold)
+
+    expect(socket.messages()).toContainEqual({ type: 'resume' })
+    socket.push({ type: 'state', state: 'speaking' })
+    expect(await screen.findByRole('textbox', { name: 'Message' })).toBeInTheDocument()
+  })
+
+  it('steps through previous calls like a carousel and back to the phone', async () => {
+    const stored = (id: string, text: string) => ({
+      id,
+      started_at: '2026-11-05T13:00:00Z',
+      ended_at: '2026-11-05T13:01:00Z',
+      end_reason: 'hangup',
+      caller_phone: '+4915122000201',
+      language: 'de',
+      message_count: 3,
+      feedback_rating: id === 'older' ? 'down' : null,
+      feedback_comment: id === 'older' ? 'Took too long.' : null,
+      messages: [
+        {
+          id: 1,
+          role: 'user',
+          source: 'voice',
+          text,
+          interrupted: false,
+          created_at: '2026-11-05T13:00:10Z',
+          tool_calls: null,
+        },
+      ],
+    })
+    const calls = [stored('newer', 'Wann kommt mein X5?'), stored('older', 'Mein Auto lädt nicht.')]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>((input) => {
+        const path = typeof input === 'string' ? input : ''
+        if (path.startsWith('/api/conversations?')) {
+          return Promise.resolve(Response.json(calls))
+        }
+        const call = calls.find((c) => path.endsWith(`/${c.id}`))
+        return Promise.resolve(Response.json(call ?? status))
+      }),
+    )
+    renderApp()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Previous call' }))
+    expect(await screen.findByText('Wann kommt mein X5?')).toBeInTheDocument()
+    expect(screen.getByText(/Previous call 1 of 2/)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Previous call' }))
+    expect(await screen.findByText('Mein Auto lädt nicht.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previous call' })).toBeDisabled()
+    // Its feedback, as given before
+    expect(screen.getByRole('button', { name: 'Not helpful' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(screen.getByRole('textbox', { name: 'Feedback comment' })).toHaveValue('Took too long.')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Next call' }))
+    expect(await screen.findByText('Wann kommt mein X5?')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Back to phone' }))
+    expect(await screen.findByRole('button', { name: 'Start call' })).toBeInTheDocument()
+  })
+
+  it("doesn't browse during a call", async () => {
+    renderApp()
+    await dial()
+
+    expect(screen.getByRole('button', { name: 'Previous call' })).toBeDisabled()
+  })
+
+  it('asks for feedback under a finished call and saves it', async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) =>
+      Promise.resolve(
+        typeof input === 'string' && input.includes('/feedback')
+          ? Response.json({})
+          : Response.json(status),
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    renderApp()
+    const socket = await dial()
+    socket.push({ type: 'call_ended', reason: 'hangup' })
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Helpful' }))
+    expect(await screen.findByText('Thanks for your feedback.')).toBeInTheDocument()
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Feedback comment' }),
+      'Quick and kind',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Send comment' }))
+
+    const feedback = fetchMock.mock.calls.filter(
+      ([input]) => typeof input === 'string' && input.includes('/feedback'),
+    )
+    expect(feedback.map(([input, init]) => [input, init?.method, init?.body])).toEqual([
+      ['/api/conversations/c1/feedback', 'PUT', JSON.stringify({ rating: 'up', comment: null })],
+      [
+        '/api/conversations/c1/feedback',
+        'PUT',
+        JSON.stringify({ rating: 'up', comment: 'Quick and kind' }),
+      ],
+    ])
+    expect(await screen.findByText('Thanks for your feedback.')).toBeInTheDocument()
   })
 })

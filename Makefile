@@ -64,6 +64,10 @@ test-speech: ## Run the speech tests with the real models (downloaded into backe
 test-openai: ## Run the tests against OpenAI's speech models (needs OPENAI_API_KEY; costs a few cents)
 	$(UV_RUN) pytest -m openai
 
+.PHONY: test-db
+test-db: ## Run the customer care system's tests against PostgreSQL (needs `make dev`; uses its own test database)
+	$(UV_RUN) pytest -m db
+
 .PHONY: test-frontend
 test-frontend: ## Run frontend tests (vitest)
 	$(PNPM) test
@@ -95,6 +99,10 @@ db-revision: ## Generate a migration from the models against the dev database: m
 	$(UV_RUN) alembic upgrade head
 	$(UV_RUN) alembic revision --autogenerate -m "$(m)"
 
+.PHONY: seed
+seed: ## Reset the customer care system to its 20 starting cases (dev database)
+	$(UV_RUN) python -m voice_agent.crm.seed --reset
+
 .PHONY: psql
 psql: ## Open psql on the dev database
 	$(DEV_COMPOSE) exec postgres psql --username voice_agent voice_agent
@@ -102,6 +110,10 @@ psql: ## Open psql on the dev database
 .PHONY: llm-smoke
 llm-smoke: ## Ask the configured language model one question (settings from .env)
 	$(UV_RUN) python -m scripts.llm_smoke
+
+.PHONY: eval
+eval: ## Run Carrie's scenario evaluation against the configured model (costs tokens): make eval args="--only DEL-1"
+	$(UV_RUN) python -m scripts.scenario_eval $(args)
 
 .PHONY: call-smoke
 call-smoke: ## Make a scripted live call against the running stack: make call-smoke args="--speak question.wav"

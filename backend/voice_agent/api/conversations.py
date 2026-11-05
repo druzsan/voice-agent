@@ -10,6 +10,7 @@ from voice_agent.conversation.records import (
     ConversationDetail,
     ConversationSummary,
     EndReason,
+    FeedbackRating,
     Message,
 )
 from voice_agent.conversation.turns import (
@@ -20,6 +21,7 @@ from voice_agent.conversation.turns import (
     TurnInProgress,
     TurnResult,
 )
+from voice_agent.crm.matching import normalize_phone
 from voice_agent.services import ServicesDep, TurnsDep
 from voice_agent.speech.audio import InvalidAudio, max_wav_bytes
 from voice_agent.speech.ports import AudioClip
@@ -52,6 +54,18 @@ class TextTurnRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)
     ]
     via: Literal["keyboard", "keypad"] = "keyboard"
+
+
+class StartRequest(BaseModel):
+    # The caller's number as the phone line would report it
+    caller_phone: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    rating: FeedbackRating
+    comment: Annotated[
+        str | None, StringConstraints(strip_whitespace=True, max_length=2000)
+    ] = None
 
 
 class EndRequest(BaseModel):
@@ -116,9 +130,15 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def start_conversation(turns: TurnsDep) -> StartResponse:
+async def start_conversation(
+    turns: TurnsDep, request: StartRequest | None = None
+) -> StartResponse:
     """Start a call: the conversation and its spoken greeting."""
-    started = await turns.start()
+    started = await turns.start(
+        normalize_phone(request.caller_phone)
+        if request and request.caller_phone
+        else None
+    )
     return StartResponse(
         conversation=started.conversation,
         greeting=started.greeting,
@@ -191,6 +211,22 @@ async def end_conversation(
         await turns.end(conversation_id, (end or EndRequest()).reason)
     except (TurnError, InvalidAudio) as error:
         _turn_errors(error)
+
+
+@router.put("/{conversation_id}/feedback", responses=ERROR_RESPONSES)
+async def give_feedback(
+    conversation_id: UUID, feedback: FeedbackRequest, services: ServicesDep
+) -> Conversation:
+    """The caller's thumbs up or down on a call, with an optional comment.
+
+    Giving feedback again replaces it; it works during and after the call.
+    """
+    saved = await services.repository.save_feedback(
+        conversation_id, feedback.rating, feedback.comment or None
+    )
+    if saved is None:
+        _fail(status.HTTP_404_NOT_FOUND, "not_found", "No such conversation.")
+    return saved
 
 
 @router.get("")

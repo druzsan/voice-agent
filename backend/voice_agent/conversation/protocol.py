@@ -6,7 +6,7 @@ frames: 16 kHz mono PCM16, little-endian.
 """
 
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints, TypeAdapter
@@ -17,7 +17,8 @@ from voice_agent.usage import Usage
 # Largest accepted binary frame (about 2 s of audio)
 MAX_AUDIO_FRAME_BYTES = 64 * 1024
 
-CallState = Literal["listening", "thinking", "speaking"]
+# on_hold: transferred to a colleague; the call waits until the caller resumes
+CallState = Literal["listening", "thinking", "speaking", "on_hold"]
 
 
 # --- Browser to server ---------------------------------------------------------
@@ -62,12 +63,18 @@ class Hangup(BaseModel):
     type: Literal["hangup"]
 
 
+class Resume(BaseModel):
+    """The caller picks the call up again after being on hold."""
+
+    type: Literal["resume"]
+
+
 ClientMessage = Annotated[
-    TextInput | Played | Mute | Hangup, Field(discriminator="type")
+    TextInput | Played | Mute | Hangup | Resume, Field(discriminator="type")
 ]
 CLIENT_MESSAGE: TypeAdapter[ClientMessage] = TypeAdapter(ClientMessage)
 
-ClientEvent = AudioFrame | TextInput | Played | Mute | Hangup
+ClientEvent = AudioFrame | TextInput | Played | Mute | Hangup | Resume
 
 
 # --- Server to browser ---------------------------------------------------------
@@ -78,6 +85,9 @@ class CallStarted(BaseModel):
 
     type: Literal["call_started"] = "call_started"
     conversation_id: UUID
+    caller_phone: str | None
+    language: str
+    supported_languages: list[str]
 
 
 class StateChanged(BaseModel):
@@ -159,6 +169,24 @@ class TurnDone(BaseModel):
     usage: list[Usage] = []
 
 
+class ToolActivity(BaseModel):
+    """Carrie used a tool in turn `turn`: looked something up or changed it."""
+
+    type: Literal["tool"] = "tool"
+    turn: int
+    name: str
+    status: Literal["ok", "refused", "failed"]
+    label: str
+    data: dict[str, Any] = {}
+
+
+class LanguageChanged(BaseModel):
+    """The conversation continues in another language."""
+
+    type: Literal["language"] = "language"
+    language: str
+
+
 class UsageReport(BaseModel):
     """Consumption outside of a turn, e.g. recognizing speech that was noise."""
 
@@ -166,7 +194,7 @@ class UsageReport(BaseModel):
     usage: list[Usage]
 
 
-ErrorCode = Literal["invalid_message", "stt_failed", "busy"]
+ErrorCode = Literal["invalid_message", "stt_failed", "busy", "on_hold"]
 
 
 class CallError(BaseModel):
@@ -195,6 +223,8 @@ ServerMessage = (
     | AssistantMessage
     | Interrupted
     | TurnDone
+    | ToolActivity
+    | LanguageChanged
     | UsageReport
     | CallError
     | CallEnded

@@ -34,6 +34,8 @@ class TtsStatus(BaseModel):
 
 class StatusResponse(BaseModel):
     database: Literal["ok", "error"]
+    # Languages Carrie holds conversations in with these speech models
+    languages: list[str]
     llm: LlmStatus
     stt: SttStatus
     tts: TtsStatus
@@ -47,6 +49,7 @@ async def status(services: ServicesDep) -> StatusResponse:
     file_model = settings.stt_name()
     return StatusResponse(
         database="ok" if await services.repository.ping() else "error",
+        languages=list(services.carrie.supported_languages),
         llm=LlmStatus(
             provider=settings.llm_provider,
             model=settings.llm_model if settings.llm_provider != "echo" else None,

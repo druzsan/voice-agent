@@ -130,3 +130,29 @@
     animation: none;
   }
 }
+
+/* A tool Carrie used, between the messages */
+.tool {
+  align-self: center;
+  max-width: 90%;
+  padding: 2px 10px;
+  border-radius: 10px;
+  color: light-dark(var(--mantine-color-teal-9), var(--mantine-color-teal-2));
+  background: light-dark(var(--mantine-color-teal-0), rgb(18 184 134 / 0.15));
+
+  &[data-status='refused'],
+  &[data-status='failed'] {
+    color: light-dark(var(--mantine-color-orange-9), var(--mantine-color-orange-2));
+    background: light-dark(var(--mantine-color-orange-0), rgb(253 126 20 / 0.15));
+  }
+}
+
+/* The caller's number before dialing */
+.number {
+  width: 240px;
+}
+
+/* Keeps its place in the header without showing */
+.hidden {
+  visibility: hidden;
+}
