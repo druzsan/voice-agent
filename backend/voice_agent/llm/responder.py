@@ -24,8 +24,12 @@ from voice_agent.llm.prompts import (
     SYSTEM_PROMPT,
     interruption_note,
 )
+from voice_agent.usage import Usage
 
 logger = logging.getLogger(__name__)
+
+# The cost of a model run in USD, None when unknown
+LlmPrice = Callable[[RunUsage], float | None]
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,8 @@ class Reply:
     # "template" when the model wasn't asked or failed
     source: Literal["llm", "template"]
     usage: dict[str, int] | None = None
+    # Tokens, time and cost of the model run; None when it didn't run
+    metered: Usage | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,9 @@ class StreamedReply:
     # From the request to the first text and to the end of the answer
     first_token_ms: int | None = None
     total_ms: int | None = None
+    # Tokens, time and cost of the model run; None when it didn't run, or
+    # failed before it reported usage
+    metered: Usage | None = None
 
 
 def _usage(usage: RunUsage) -> dict[str, int]:
@@ -94,12 +103,37 @@ def to_model_history(
 class Responder:
     """Plain answers from the configured language model, without tools."""
 
-    def __init__(self, model: Model | None, timeout_s: float, max_tokens: int) -> None:
+    def __init__(
+        self,
+        model: Model | None,
+        timeout_s: float,
+        max_tokens: int,
+        *,
+        name: str | None = None,
+        price: LlmPrice | None = None,
+    ) -> None:
         self._agent = (
             Agent(model, instructions=SYSTEM_PROMPT, output_type=str) if model else None
         )
         self._timeout_s = timeout_s
         self._settings = ModelSettings(max_tokens=max_tokens)
+        self._name = name or (model.model_name if model else "none")
+        self._price = price
+
+    def _metered(self, usage: RunUsage, duration_ms: int) -> Usage:
+        try:
+            cost = self._price(usage) if self._price else None
+        except Exception:
+            logger.exception("Couldn't price a model run")
+            cost = None
+        return Usage(
+            service="llm",
+            model=self._name,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            duration_ms=duration_ms,
+            cost_usd=cost,
+        )
 
     @property
     def configured(self) -> bool:
@@ -108,6 +142,7 @@ class Responder:
     async def reply(self, history: Sequence[Message], text: str) -> Reply:
         if self._agent is None:
             return Reply(LLM_NOT_CONFIGURED, "template")
+        started = time.perf_counter()
         try:
             with anyio.fail_after(self._timeout_s):
                 result = await self._agent.run(
@@ -122,7 +157,12 @@ class Responder:
         if not answer:
             logger.warning("The language model returned an empty answer")
             return Reply(LLM_FAILED, "template")
-        return Reply(answer, "llm", _usage(result.usage))
+        return Reply(
+            answer,
+            "llm",
+            _usage(result.usage),
+            self._metered(result.usage, _ms_since(started)),
+        )
 
     async def stream(
         self,
@@ -155,7 +195,7 @@ class Responder:
                             first_token_ms = _ms_since(started)
                         pieces.append(delta)
                         await on_text(delta)
-                    usage = _usage(result.usage)
+                    run_usage = result.usage
         except Exception:
             logger.exception("The language model failed while answering")
             return StreamedReply(
@@ -168,13 +208,15 @@ class Responder:
         answer = "".join(pieces).strip()
         if not answer:
             logger.warning("The language model returned an empty answer")
+        total_ms = _ms_since(started)
         return StreamedReply(
             answer,
             "llm",
-            usage,
+            _usage(run_usage),
             failed=not answer,
             first_token_ms=first_token_ms,
-            total_ms=_ms_since(started),
+            total_ms=total_ms,
+            metered=self._metered(run_usage, total_ms),
         )
 
 

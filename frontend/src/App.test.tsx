@@ -45,8 +45,13 @@ vi.mock('./audio/microphone.ts', () => ({
 const status: Status = {
   database: 'ok',
   llm: { provider: 'requesty', model: 'azure/gpt-4.1-mini', configured: true },
-  stt: { provider: 'local', model: 'small.en', max_recording_s: 30 },
-  tts: { provider: 'local', model: 'en_US-lessac-medium' },
+  stt: {
+    provider: 'openai',
+    model: 'openai/gpt-live-transcribe',
+    fallback_model: 'openai/gpt-4o-mini-transcribe',
+    max_recording_s: 30,
+  },
+  tts: { provider: 'openai', model: 'openai/gpt-4o-mini-tts/marin', speed: 1.25 },
 }
 
 // The backend's end of the call
@@ -212,6 +217,54 @@ describe('Phone', () => {
     await userEvent.click(screen.getByRole('button', { name: '# (send)' }))
 
     expect(socket.messages()).toContainEqual({ type: 'text', text: '4711', via: 'keypad' })
+  })
+
+  it('shows the models in use', async () => {
+    renderApp()
+
+    const models = await screen.findByRole('table', { name: 'Models' })
+    expect(models).toHaveTextContent(
+      'openai/gpt-live-transcribe (fallback openai/gpt-4o-mini-transcribe)',
+    )
+    expect(models).toHaveTextContent('openai/gpt-4o-mini-tts/marin · speed 1.25')
+  })
+
+  it('adds up what the dialog consumed', async () => {
+    renderApp()
+    const socket = await dial()
+
+    const usage = (service: 'stt' | 'llm' | 'tts', cost: number | null) => ({
+      service,
+      model: `${service}-model`,
+      calls: 1,
+      input_tokens: service === 'llm' ? 200 : 0,
+      output_tokens: service === 'llm' ? 30 : 0,
+      audio_in_s: service === 'stt' ? 2 : 0,
+      audio_out_s: service === 'tts' ? 3 : 0,
+      duration_ms: 500,
+      cost_usd: cost,
+    })
+    socket.push(
+      {
+        type: 'turn_done',
+        turn: 2,
+        timings_ms: { stt: 600, first_audio: 2400 },
+        usage: [usage('stt', 0.001), usage('llm', 0.002)],
+      },
+      {
+        type: 'turn_done',
+        turn: 3,
+        timings_ms: { stt: 400, first_audio: 1600 },
+        usage: [usage('llm', 0.002), usage('tts', null)],
+      },
+    )
+
+    const table = screen.getByRole('table', { name: 'Usage of this dialog' })
+    expect(table).toHaveTextContent('Language model2400 → 60')
+    // The synthesis has no known price, so the total is a lower bound
+    expect(table).toHaveTextContent('Total≥ $0.0050')
+    const latency = screen.getByRole('table', { name: 'Latency of this dialog' })
+    expect(latency).toHaveTextContent('First audio2.00 s1.60 s2')
   })
 
   it('stops speaking when the caller interrupts', async () => {

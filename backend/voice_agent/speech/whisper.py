@@ -10,12 +10,14 @@ from faster_whisper import WhisperModel
 
 from voice_agent.speech.audio import SAMPLE_RATE
 from voice_agent.speech.ports import Samples, Transcript
+from voice_agent.usage import Usage
 
 
 class FasterWhisperRecognizer:
     """English speech recognition with faster-whisper, on the CPU."""
 
     def __init__(self, model_dir: Path, beam_size: int) -> None:
+        self._name = f"faster-whisper/{model_dir.name}"
         self._model = WhisperModel(str(model_dir), device="cpu", compute_type="int8")
         self._beam_size = beam_size
         # One recognition at a time; parallel runs would only compete for the cores
@@ -39,13 +41,15 @@ class FasterWhisperRecognizer:
             without_timestamps=True,
         )
         recognized = list(segments)
+        audio_s = len(samples) / SAMPLE_RATE
         return Transcript(
             text=" ".join(segment.text.strip() for segment in recognized).strip(),
-            audio_ms=round(len(samples) / SAMPLE_RATE * 1000),
+            audio_ms=round(audio_s * 1000),
             avg_logprob=fmean(s.avg_logprob for s in recognized)
             if recognized
             else None,
             no_speech_prob=fmean(s.no_speech_prob for s in recognized)
             if recognized
             else None,
+            usage=Usage(service="stt", model=self._name, audio_in_s=round(audio_s, 3)),
         )

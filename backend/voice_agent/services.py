@@ -20,8 +20,8 @@ from voice_agent.conversation.records import CallSetup
 from voice_agent.conversation.repository import ConversationRepository
 from voice_agent.conversation.turns import TurnService
 from voice_agent.db.repository import SqlConversationRepository, create_engine
-from voice_agent.llm.providers import build_model
-from voice_agent.llm.responder import Responder
+from voice_agent.llm.providers import build_model, llm_price, model_name
+from voice_agent.llm.responder import LlmPrice, Responder
 from voice_agent.speech.audio import synthesize_clip
 from voice_agent.speech.model_files import (
     ensure_models,
@@ -107,9 +107,13 @@ class Services:
         )
 
 
-def build_responder(settings: Settings) -> Responder:
+def build_responder(settings: Settings, price: LlmPrice | None = None) -> Responder:
     return Responder(
-        build_model(settings), settings.llm_timeout_s, settings.llm_max_tokens
+        build_model(settings),
+        settings.llm_timeout_s,
+        settings.llm_max_tokens,
+        name=model_name(settings),
+        price=price,
     )
 
 
@@ -134,7 +138,7 @@ async def production_services(settings: Settings) -> AsyncGenerator[Services]:
             recognizer=recognizer,
             live_recognizer=live_recognizer,
             synthesizer=_build_synthesizer(settings, openai),
-            responder=build_responder(settings),
+            responder=build_responder(settings, await llm_price(settings)),
             vad=SileroVad(),
         )
         await warm_up(services, recognizer=local_stt, synthesizer=local_tts)

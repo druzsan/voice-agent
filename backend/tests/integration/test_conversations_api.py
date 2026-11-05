@@ -244,3 +244,22 @@ def test_the_list_shows_the_newest_conversation_first(client: TestClient) -> Non
     listed = client.get("/api/conversations").json()
 
     assert [(c["id"], c["message_count"]) for c in listed] == [(second, 3), (first, 1)]
+
+
+def test_push_to_talk_turns_store_what_their_models_consumed(
+    client: TestClient,
+) -> None:
+    conversation = client.post("/api/conversations").json()
+    greeting = conversation["greeting"]
+    assert [u["service"] for u in greeting["usage"]] == ["tts"]
+
+    body = client.post(
+        f"/api/conversations/{conversation['conversation']['id']}/turns/voice",
+        content=wav_of_silence(1.5),
+        headers={"content-type": "audio/wav"},
+    ).json()
+
+    assert [u["service"] for u in body["user_message"]["usage"]] == ["stt"]
+    answer = body["assistant_message"]["usage"]
+    assert [u["service"] for u in answer] == ["llm", "tts"]
+    assert all(u["duration_ms"] >= 0 for u in answer)

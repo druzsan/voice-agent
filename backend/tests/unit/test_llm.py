@@ -12,11 +12,12 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.usage import RunUsage
 
 from voice_agent.config import LlmProvider, Settings
 from voice_agent.conversation.records import Message, Role, Source
 from voice_agent.llm.prompts import LLM_NOT_CONFIGURED
-from voice_agent.llm.providers import build_model, echo_model
+from voice_agent.llm.providers import build_model, echo_model, llm_price
 from voice_agent.llm.responder import Responder, StreamedReply, to_model_history
 
 pytestmark = pytest.mark.anyio
@@ -196,3 +197,32 @@ async def test_an_unconfigured_model_streams_a_fixed_reply() -> None:
 
     assert deltas == [LLM_NOT_CONFIGURED]
     assert reply.source == "template"
+
+
+async def test_a_run_is_metered_with_its_price() -> None:
+    responder = Responder(
+        echo_model(),
+        timeout_s=5,
+        max_tokens=100,
+        name="echo",
+        price=lambda usage: usage.output_tokens * 0.001,
+    )
+
+    async def ignore(delta: str) -> None:
+        pass
+
+    reply = await responder.stream([], "Hi", ignore)
+
+    metered = reply.metered
+    assert metered is not None
+    assert (metered.service, metered.model) == ("llm", "echo")
+    assert metered.output_tokens > 0
+    assert metered.cost_usd == pytest.approx(metered.output_tokens * 0.001)
+    assert metered.duration_ms >= 0
+
+
+async def test_echo_costs_nothing() -> None:
+    price = await llm_price(settings("echo"))
+
+    assert price is not None
+    assert price(RunUsage(input_tokens=10, output_tokens=5)) == 0

@@ -1,3 +1,32 @@
+.page {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--mantine-spacing-lg);
+  min-height: 100dvh;
+  padding: var(--mantine-spacing-md);
+
+  @media (max-width: 420px) {
+    padding: 0;
+    gap: 0;
+  }
+}
+
+.stats {
+  width: 460px;
+  max-width: 100%;
+  overflow-x: auto;
+
+  @media (max-width: 420px) {
+    border-radius: 0;
+  }
+}
+
+.model {
+  overflow-wrap: anywhere;
+}
+
 .phone {
   display: flex;
   flex-direction: column;

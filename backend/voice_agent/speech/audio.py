@@ -60,7 +60,7 @@ async def synthesize_clip(synthesizer: SpeechSynthesizer, text: str) -> AudioCli
     async def collect(chunk: AudioChunk) -> None:
         chunks.append(chunk)
 
-    await synthesizer.synthesize(text, collect)
+    usage = await synthesizer.synthesize(text, collect)
     if not chunks:
         raise ValueError("The synthesizer produced no audio")
     sample_rate = chunks[0].sample_rate
@@ -69,6 +69,7 @@ async def synthesize_clip(synthesizer: SpeechSynthesizer, text: str) -> AudioCli
         wav=write_wav(pcm, sample_rate),
         sample_rate=sample_rate,
         duration_ms=round(len(pcm) / 2 / sample_rate * 1000),
+        usage=usage,
     )
 
 

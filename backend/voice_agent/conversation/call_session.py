@@ -53,6 +53,7 @@ from voice_agent.conversation.protocol import (
     StateChanged,
     TextInput,
     TurnDone,
+    UsageReport,
     UserMessage,
 )
 from voice_agent.conversation.records import (
@@ -86,6 +87,7 @@ from voice_agent.speech.vad import (
     SpeechStarted,
     VoiceActivityDetector,
 )
+from voice_agent.usage import Usage, combine
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,12 @@ class _Reply:
     spoken: list[tuple[int, str]] = field(default_factory=list[tuple[int, str]])
     usage: dict[str, int] | None = None
     timings_ms: dict[str, int] = field(default_factory=dict[str, int])
+    # What its model calls consumed (the language model, each sentence's
+    # synthesis), stored with it
+    metered: list[Usage] = field(default_factory=list[Usage])
+    # The rest of the turn's consumption, only reported: the caller's speech
+    # recognition, and a failed answer before this fixed one
+    earlier: list[Usage] = field(default_factory=list[Usage])
     # Played to the end
     finished: bool = False
     # The model failed partway; nothing is known about what was heard
@@ -427,6 +435,7 @@ class CallSession:
         await self._set_state("thinking")
         user_timings: dict[str, int] | None = None
         stt: dict[str, float | int | None] | None = None
+        stt_usage: Usage | None = None
         source: Source
         if isinstance(item, _Spoken):
             started, source = item.ended_at, "voice"
@@ -443,6 +452,8 @@ class CallSession:
                 )
                 return
             user_timings = {"stt": round((time.perf_counter() - recognizing) * 1000)}
+            if transcript.usage is not None:
+                stt_usage = transcript.usage.timed(user_timings["stt"])
             stt = {
                 "audio_ms": transcript.audio_ms,
                 "avg_logprob": transcript.avg_logprob,
@@ -450,6 +461,9 @@ class CallSession:
             }
             if heard_nothing(transcript):
                 logger.info("Nothing heard: %r %s", transcript.text, stt)
+                # Not part of a turn, but it was recognized all the same
+                if stt_usage is not None:
+                    await self._send(UsageReport(usage=[stt_usage]))
                 return
             text = transcript.text
         else:
@@ -464,13 +478,20 @@ class CallSession:
         user = await self._repository.add_message(
             conversation_id,
             NewMessage(
-                role="user", source=source, text=text, timings_ms=user_timings, stt=stt
+                role="user",
+                source=source,
+                text=text,
+                timings_ms=user_timings,
+                stt=stt,
+                usage=combine([stt_usage]) or None,
             ),
         )
         await self._send(UserMessage(id=user.id, text=user.text, source=user.source))
         reply = _Reply(turn, "llm", started)
         if user_timings:
             reply.timings_ms.update(user_timings)
+        if stt_usage is not None:
+            reply.earlier.append(stt_usage)
         await self._answer(reply, history, text)
 
     async def _transcribe(self, item: _Spoken) -> Transcript:
@@ -484,11 +505,13 @@ class CallSession:
                     exc_info=True,
                 )
             else:
+                usage = combine(part.usage for part in parts)
                 return Transcript(
                     text=" ".join(part.text for part in parts if part.text),
                     audio_ms=round(len(item.audio) / SAMPLE_RATE * 1000),
                     avg_logprob=None,
                     no_speech_prob=None,
+                    usage=usage[0] if usage else None,
                 )
         return await self._recognizer.transcribe(item.audio, trim_silence=False)
 
@@ -521,6 +544,8 @@ class CallSession:
                 result.source,
                 result.usage,
             )
+            if result.metered is not None:
+                reply.metered.append(result.metered)
             for name, value in (
                 ("llm_first_token", result.first_token_ms),
                 ("llm_total", result.total_ms),
@@ -534,9 +559,9 @@ class CallSession:
                 with anyio.CancelScope(shield=True):
                     await self._store(reply)
                 self._reply = None
-                await self._speak_fixed(
-                    _Reply(reply.turn, "template", reply.started), LLM_FAILED
-                )
+                fallback = _Reply(reply.turn, "template", reply.started)
+                fallback.earlier = [*reply.earlier, *reply.metered]
+                await self._speak_fixed(fallback, LLM_FAILED)
                 return
             await self._finish(reply)
         finally:
@@ -595,11 +620,16 @@ class CallSession:
                 )
             )
 
+        synthesizing = time.perf_counter()
         try:
-            await self._synthesizer.synthesize(spoken, on_audio)
+            usage = await self._synthesizer.synthesize(spoken, on_audio)
         except Exception:
             # The caller still reads the text, and hears what came so far
             logger.exception("Speech synthesis failed")
+        else:
+            reply.metered.append(
+                usage.timed(round((time.perf_counter() - synthesizing) * 1000))
+            )
         if clip is not None:
             await self._send(
                 AudioEnd(
@@ -638,6 +668,7 @@ class CallSession:
                 text=text,
                 timings_ms=reply.timings_ms or None,
                 llm_usage=reply.usage,
+                usage=combine(reply.metered) or None,
                 interrupted=interrupted,
                 heard_text=heard_text,
             ),
@@ -652,7 +683,13 @@ class CallSession:
             )
         )
         if not reply.failed:
-            await self._send(TurnDone(turn=turn, timings_ms=reply.timings_ms))
+            await self._send(
+                TurnDone(
+                    turn=turn,
+                    timings_ms=reply.timings_ms,
+                    usage=combine([*reply.earlier, *reply.metered]),
+                )
+            )
         logger.info(
             "Turn %d of %s%s: %s",
             turn,

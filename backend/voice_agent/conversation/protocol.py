@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, StringConstraints, TypeAdapter
 
 from voice_agent.conversation.records import EndReason, Source
+from voice_agent.usage import Usage
 
 # Largest accepted binary frame (about 2 s of audio)
 MAX_AUDIO_FRAME_BYTES = 64 * 1024
@@ -154,6 +155,15 @@ class TurnDone(BaseModel):
     type: Literal["turn_done"] = "turn_done"
     turn: int
     timings_ms: dict[str, int]
+    # What the turn's model calls consumed, per service and model
+    usage: list[Usage] = []
+
+
+class UsageReport(BaseModel):
+    """Consumption outside of a turn, e.g. recognizing speech that was noise."""
+
+    type: Literal["usage"] = "usage"
+    usage: list[Usage]
 
 
 ErrorCode = Literal["invalid_message", "stt_failed", "busy"]
@@ -185,6 +195,7 @@ ServerMessage = (
     | AssistantMessage
     | Interrupted
     | TurnDone
+    | UsageReport
     | CallError
     | CallEnded
 )

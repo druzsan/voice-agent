@@ -1,5 +1,6 @@
 import type { ServerMessage } from '../api/callProtocol.ts'
 import type { Role, Source } from '../api/conversations.ts'
+import { addTurn, addUsage, type DialogStats, emptyStats } from './dialogStats.ts'
 
 // The backend decides the call's state; the page shows it. The caller can
 // talk or type at any time: the backend queues what arrives during a turn,
@@ -33,6 +34,8 @@ export interface CallState {
   endedAt: number | null
   // Shown below the transcript, e.g. "Please wait for the answer."
   notice: string | null
+  // Time, tokens and cost of the whole dialog so far
+  stats: DialogStats
 }
 
 export type CallAction =
@@ -54,6 +57,7 @@ export const initialCallState: CallState = {
   startedAt: null,
   endedAt: null,
   notice: null,
+  stats: emptyStats(),
 }
 
 export function isInCall(phase: Phase): boolean {
@@ -124,10 +128,13 @@ function receive(state: CallState, message: ServerMessage, at: number): CallStat
         callerSpeaking: false,
         notice: END_NOTICES[message.reason] ?? null,
       }
+    case 'turn_done':
+      return { ...state, stats: addTurn(addUsage(state.stats, message.usage), message.timings_ms) }
+    case 'usage':
+      return { ...state, stats: addUsage(state.stats, message.usage) }
     case 'audio':
     case 'audio_end':
     case 'interrupted':
-    case 'turn_done':
       return state
   }
 }

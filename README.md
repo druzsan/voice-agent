@@ -30,7 +30,7 @@ VOICE_AGENT_LLM_MODEL=azure/gpt-6.1-sol@germanywestcentral # model ID as the pro
 VOICE_AGENT_REQUESTY_BASE_URL=https://router.eu.requesty.ai/v1   # the default; global: https://router.requesty.ai/v1
 ```
 
-[.env.example](.env.example) shows the choices for the language model and the speech models; [config.py](backend/voice_agent/config.py) describes every setting. `make llm-smoke` asks the configured model one question, which checks the provider, model ID and key without the UI. The idle screen shows which model the app uses.
+[.env.example](.env.example) shows the choices for the language model and the speech models; [config.py](backend/voice_agent/config.py) describes every setting. `make llm-smoke` asks the configured model one question, which checks the provider, model ID and key without the UI. The panel next to the phone shows the models the app uses, and what the current call consumed (see [Usage and costs](#usage-and-costs)).
 
 ### OpenAI speech
 
@@ -79,7 +79,7 @@ The backend decides the call's state and announces it: `listening`, `thinking` (
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | Liveness, for the container health check |
-| `GET /api/status` | Database reachable, model in use, speech models, recording limit |
+| `GET /api/status` | Database reachable, model in use, speech models (with the fallback recognizer and the speaking pace), recording limit |
 | `WS /api/call` | A live call, see below |
 | `POST /api/conversations` | Push-to-talk call over HTTP: conversation, greeting and its audio |
 | `POST /api/conversations/{id}/turns/voice` | A recording (`audio/wav`, 16 kHz mono 16-bit) → caller message, answer and audio |
@@ -107,7 +107,8 @@ The live call's messages ([protocol.py](backend/voice_agent/conversation/protoco
 | ← | `audio_end {clip, turn, text, duration_ms}` | The sentence's last piece has been sent |
 | ← | `assistant_message {id, turn, text, source, interrupted}` | The stored answer |
 | ← | `interrupted {turn}` | The caller talked over the answer: stop playing, drop queued clips |
-| ← | `turn_done {turn, timings_ms}` | Stage timings of the turn |
+| ← | `turn_done {turn, timings_ms, usage}` | Stage timings of the turn, and what its model calls consumed |
+| ← | `usage {usage}` | Consumption outside of a turn: recognizing speech that turned out to be nothing |
 | ← | `error {code, message}` | `invalid_message`, `stt_failed` or `busy`; the call goes on |
 | ← | `call_ended {reason}` | Last message before the backend closes the connection |
 
@@ -122,8 +123,21 @@ Only pages of this app may connect: a browser's `Origin` must match the `Host` (
   - **Timings in milliseconds:** for push-to-talk turns `stt`, `llm`, `tts` and `total`. For live calls `stt` (on the caller's message), `llm_first_token` and `llm_total` (from the request to the model's first text and to its end), and `first_audio` and `total` (from the end of the caller's turn to the first clip and to the last one).
   - **Recognition metrics:** audio length, average log probability, no-speech probability (the last two only from Whisper).
   - **Token usage** of the answer.
+  - **Usage per service and model** (`usage`): calls, tokens in and out, audio seconds heard or spoken, the calls' time and their cost in USD. Speech recognition is stored on the caller's message, the language model and speech synthesis on the answer.
 
 Audio is not stored.
+
+### Usage and costs
+
+Every model call reports what it consumed, and its time is measured around it:
+
+| Service | Tokens | Audio | Cost |
+|---|---|---|---|
+| Speech recognition | OpenAI file transcription: audio in, text out | Length of the utterance | [genai-prices](https://github.com/pydantic/genai-prices); live transcription is billed by audio duration, $0.017 per minute |
+| Language model | As the provider reports them | – | Requesty: its own price list (`/models`, read at startup, including its margin); OpenAI and OpenRouter: genai-prices; `echo`: free |
+| Speech synthesis | OpenAI: text in, audio out (from the speech stream's last event) | Length of the spoken audio | genai-prices |
+
+Local models (faster-whisper, Piper) report audio and time and cost nothing. A cost is unknown (`null`) when there's no price for the model; the page then shows the known part as a lower bound ("≥"). The panel next to the phone adds up the call: per service the calls, tokens, audio, time and cost, the total cost, and the mean and last time of each stage of a turn (transcript ready, the model's first text, first audio, whole answer). In a measured call with OpenAI speech and `gpt-6.1-sol`, one 9 s question and its 12 s answer cost about $0.008: recognition $0.0026, the model $0.0011, synthesis $0.0046.
 
 ## Services
 
@@ -207,7 +221,6 @@ These are single manual measurements, not a benchmark. They were taken with a 0.
 - Echo: without headphones, the assistant's voice can reach the microphone. Short echo is ignored, but loud speakers can interrupt the assistant with its own voice.
 - Local recognition only starts when the caller's turn has ended. OpenAI's live transcription listens while the caller speaks, but partial transcripts aren't shown.
 - OpenAI announced the shutdown of `gpt-4o-mini-tts` on 2027-01-06 and of `gpt-4o-mini-transcribe` on 2027-02-26. The named transcription successor `gpt-transcribe` is a setting away (`VOICE_AGENT_OPENAI_STT_MODEL`); the named speech successor `gpt-realtime-2.1-mini` runs only on the Realtime API and would need its own synthesizer.
-- Usage and costs of OpenAI's speech models aren't recorded.
 - A call that loses its connection can't be resumed: it has ended, like a phone call.
 - No login: the app is published on `localhost` only.
 - One backend process; per-conversation turn locks live in memory.

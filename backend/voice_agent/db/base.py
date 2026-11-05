@@ -23,4 +23,5 @@ class Base(DeclarativeBase):
         UUID: Uuid,
         dict[str, Any]: JSONB,
         dict[str, int]: JSONB,
+        list[dict[str, Any]]: JSONB,
     }

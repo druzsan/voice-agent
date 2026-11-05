@@ -29,6 +29,7 @@ from voice_agent.speech.ports import (
     SpeechSynthesizer,
     Transcript,
 )
+from voice_agent.usage import Usage, combine
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,13 @@ class _Stopwatch:
         }
 
 
+def _timed(usage: Usage | None, started: float) -> Usage | None:
+    """The usage with the time since `started` (time.perf_counter)."""
+    if usage is None:
+        return None
+    return usage.timed(round((time.perf_counter() - started) * 1000))
+
+
 def heard_nothing(transcript: Transcript) -> bool:
     if not transcript.text:
         return True
@@ -131,12 +139,20 @@ class TurnService:
 
     async def start(self) -> Started:
         conversation = await self._repository.create_conversation(self._setup)
+        started = time.perf_counter()
+        audio = await self._speak(GREETING)
+        tts = _timed(audio.usage if audio else None, started)
         greeting = await self._repository.add_message(
             conversation.id,
-            NewMessage(role="assistant", source="template", text=GREETING),
+            NewMessage(
+                role="assistant",
+                source="template",
+                text=GREETING,
+                usage=combine([tts]) or None,
+            ),
         )
         logger.info("Conversation %s started", conversation.id)
-        return Started(conversation, greeting, await self._speak(GREETING))
+        return Started(conversation, greeting, audio)
 
     async def voice_turn(self, conversation_id: UUID, wav: bytes) -> TurnResult:
         samples = read_wav(wav, self._max_recording_s)
@@ -154,8 +170,16 @@ class TurnService:
                     "Nothing heard in %s: %r %s", conversation_id, transcript.text, stt
                 )
                 raise NoSpeech
+            stt_usage = transcript.usage
+            if stt_usage is not None:
+                stt_usage = stt_usage.timed(stopwatch.timings_ms["stt"])
             return await self._answer(
-                conversation_id, transcript.text, "voice", stopwatch, stt=stt
+                conversation_id,
+                transcript.text,
+                "voice",
+                stopwatch,
+                stt=stt,
+                stt_usage=stt_usage,
             )
 
     async def text_turn(
@@ -200,6 +224,7 @@ class TurnService:
         source: Source,
         stopwatch: _Stopwatch,
         stt: dict[str, float | int | None] | None = None,
+        stt_usage: Usage | None = None,
     ) -> TurnResult:
         # History first, so it doesn't contain the new message twice
         history = await self._repository.recent_messages(
@@ -213,12 +238,15 @@ class TurnService:
                 text=text,
                 timings_ms=dict(stopwatch.timings_ms) or None,
                 stt=stt,
+                usage=combine([stt_usage]) or None,
             ),
         )
         reply = await self._responder.reply(history, text)
         stopwatch.lap("llm")
+        speaking = time.perf_counter()
         audio = await self._speak(reply.text)
         stopwatch.lap("tts")
+        tts = _timed(audio.usage if audio else None, speaking)
         assistant_message = await self._repository.add_message(
             conversation_id,
             NewMessage(
@@ -227,6 +255,7 @@ class TurnService:
                 text=reply.text,
                 timings_ms=stopwatch.total(),
                 llm_usage=reply.usage,
+                usage=combine([reply.metered, tts]) or None,
             ),
         )
         logger.info("Turn in %s: %s", conversation_id, assistant_message.timings_ms)

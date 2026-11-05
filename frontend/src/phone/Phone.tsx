@@ -18,6 +18,7 @@ import { type CallState, isInCall, type Phase } from './callState.ts'
 import { HangUpIcon, KeypadIcon, MicIcon, MicOffIcon, PhoneIcon, SendIcon } from './icons.tsx'
 import { Keypad } from './Keypad.tsx'
 import classes from './Phone.module.css'
+import { StatsPanel } from './StatsPanel.tsx'
 import { Transcript } from './Transcript.tsx'
 import { useCall } from './useCall.ts'
 
@@ -139,7 +140,7 @@ export function Phone() {
   const showsCall = inCall || phase === 'ended'
 
   return (
-    <Center mih="100dvh" p={{ base: 0, xs: 'md' }}>
+    <Box className={classes['page']}>
       <Box className={classes['phone']}>
         <Box className={classes['header']}>
           <Title order={2} fz="lg">
@@ -297,6 +298,7 @@ export function Phone() {
           </Stack>
         )}
       </Box>
-    </Center>
+      <StatsPanel status={status} stats={call.state.stats} />
+    </Box>
   )
 }

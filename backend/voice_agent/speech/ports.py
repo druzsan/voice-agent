@@ -6,6 +6,8 @@ from typing import Protocol
 import numpy as np
 import numpy.typing as npt
 
+from voice_agent.usage import Usage
+
 # Mono 16 kHz samples in [-1, 1], the recognizer's input format
 Samples = npt.NDArray[np.float32]
 
@@ -19,6 +21,7 @@ class Transcript:
     # single confidence score, so none is made up here.
     avg_logprob: float | None
     no_speech_prob: float | None
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,7 @@ class AudioClip:
     wav: bytes
     sample_rate: int
     duration_ms: int
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True)
@@ -56,10 +60,11 @@ class SpeechRecognizer(Protocol):
 
 
 class SpeechSynthesizer(Protocol):
-    async def synthesize(self, text: str, on_audio: OnAudio) -> None:
+    async def synthesize(self, text: str, on_audio: OnAudio) -> Usage:
         """Speak English text, passing on the audio as soon as it's generated.
 
-        Every chunk of one call has the same sample rate.
+        Every chunk of one call has the same sample rate. Returns what the
+        call consumed (its duration is the caller's to measure).
         """
         ...
 

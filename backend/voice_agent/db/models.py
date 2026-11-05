@@ -62,5 +62,7 @@ class MessageRow(Base):
     timings_ms: Mapped[dict[str, int] | None]
     stt: Mapped[dict[str, Any] | None]
     llm_usage: Mapped[dict[str, int] | None]
+    # Time, tokens, audio and cost per service and model (voice_agent.usage)
+    usage: Mapped[list[dict[str, Any]] | None]
     interrupted: Mapped[bool] = mapped_column(Boolean, server_default=false())
     heard_text: Mapped[str | None] = mapped_column(Text)

@@ -20,6 +20,7 @@ from voice_agent.conversation.records import (
 from voice_agent.speech.audio import SAMPLE_RATE, write_wav
 from voice_agent.speech.ports import AudioChunk, OnAudio, Samples, Transcript
 from voice_agent.speech.vad import FRAME_SAMPLES, SpeechProbability
+from voice_agent.usage import Usage
 
 
 class InMemoryConversationRepository:
@@ -127,6 +128,12 @@ class FakeRecognizer:
             audio_ms=round(len(samples) / SAMPLE_RATE * 1000),
             avg_logprob=self.avg_logprob,
             no_speech_prob=self.no_speech_prob,
+            usage=Usage(
+                service="stt",
+                model="fake-stt",
+                audio_in_s=round(len(samples) / SAMPLE_RATE, 3),
+                cost_usd=0.002,
+            ),
         )
 
 
@@ -138,12 +145,19 @@ class FakeSynthesizer:
         self.pieces = pieces
         self.fail = False
 
-    async def synthesize(self, text: str, on_audio: OnAudio) -> None:
+    async def synthesize(self, text: str, on_audio: OnAudio) -> Usage:
         if self.fail:
             raise RuntimeError("synthesis failed")
         self.spoken.append(text)
         for _ in range(self.pieces):
             await on_audio(AudioChunk(b"\0\0" * (SAMPLE_RATE // 20), SAMPLE_RATE))
+        return Usage(
+            service="tts",
+            model="fake-tts",
+            input_tokens=len(text),
+            audio_out_s=0.05 * self.pieces,
+            cost_usd=0.001,
+        )
 
 
 class FakePending:
@@ -160,6 +174,12 @@ class FakePending:
             audio_ms=self._audio_ms,
             avg_logprob=None,
             no_speech_prob=None,
+            usage=Usage(
+                service="stt",
+                model="fake-live-stt",
+                audio_in_s=self._audio_ms / 1000,
+                cost_usd=None,
+            ),
         )
 
 

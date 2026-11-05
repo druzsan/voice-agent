@@ -77,10 +77,33 @@ export interface Interrupted {
   turn: number
 }
 
+export type Service = 'stt' | 'llm' | 'tts'
+
+// What one or more calls of one model consumed (backend/voice_agent/usage.py)
+export interface Usage {
+  service: Service
+  model: string
+  calls: number
+  input_tokens: number
+  output_tokens: number
+  audio_in_s: number
+  audio_out_s: number
+  duration_ms: number
+  // null when the model has no known price
+  cost_usd: number | null
+}
+
 export interface TurnDone {
   type: 'turn_done'
   turn: number
   timings_ms: Record<string, number>
+  usage: Usage[]
+}
+
+// Consumption outside of a turn, e.g. recognizing speech that was noise
+export interface UsageReport {
+  type: 'usage'
+  usage: Usage[]
 }
 
 export interface CallError {
@@ -105,6 +128,7 @@ export type ServerMessage =
   | AssistantMessage
   | Interrupted
   | TurnDone
+  | UsageReport
   | CallError
   | CallEnded
 
@@ -119,6 +143,7 @@ const SERVER_MESSAGE_TYPES: ReadonlySet<string> = new Set<ServerMessage['type']>
   'assistant_message',
   'interrupted',
   'turn_done',
+  'usage',
   'error',
   'call_ended',
 ])

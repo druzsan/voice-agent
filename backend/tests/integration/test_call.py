@@ -567,3 +567,38 @@ def test_utterances_answered_together_join_their_live_transcripts(
     user = next(m for m in turn if m["type"] == "user_message")
     assert user["text"] == "My car is late. And it's red."
     assert live.session.calls == ["append", "commit", "append", "commit"]
+
+
+def test_each_turn_reports_and_stores_what_its_models_consumed(
+    caller: Caller, repository: InMemoryConversationRepository
+) -> None:
+    caller.speak(1)
+    done = caller.until("turn_done")[-1]
+
+    usage = {entry["service"]: entry for entry in done["usage"]}
+    assert set(usage) == {"stt", "llm", "tts"}
+    assert usage["stt"]["model"] == "fake-stt" and usage["stt"]["audio_in_s"] > 1
+    assert usage["llm"]["model"] == "echo" and usage["llm"]["output_tokens"] > 0
+    # Both sentences of the echo, as one entry
+    assert usage["tts"]["calls"] == 1 and usage["tts"]["cost_usd"] == 0.001
+    user, answer = repository.messages[-2:]
+    assert [u.service for u in user.usage or []] == ["stt"]
+    assert {u.service for u in answer.usage or []} == {"llm", "tts"}
+
+
+def test_the_greeting_reports_its_synthesis(connect: Callable[..., Any]) -> None:
+    with connect() as ws:
+        done = Caller(ws).until("turn_done")[-1]
+
+    assert [(u["service"], u["calls"]) for u in done["usage"]] == [("tts", 2)]
+
+
+def test_recognizing_noise_is_reported_outside_a_turn(
+    caller: Caller, recognizer: FakeRecognizer
+) -> None:
+    recognizer.text = ""
+    caller.speak(1)
+
+    report = caller.until("usage")[-1]
+
+    assert [u["model"] for u in report["usage"]] == ["fake-stt"]
