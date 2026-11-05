@@ -1,6 +1,6 @@
 # Voice Agent
 
-**Carrie**, the first-contact customer care voice agent of TAC ("The Automotive Company"), in an app that works like a phone call. Press the green button to call and just talk: Carrie notices when you pause, starts speaking her answer while she's still writing it, and stops when you talk over it. She handles delivery inquiries, EV charging problems, the vehicle app and warranty or service disputes; looks up orders and tickets in a customer care system; adds information to open tickets or opens new ones; and transfers to a colleague with a handover summary. You can also type, or enter digits on the keypad. The red button hangs up. Every conversation is stored in PostgreSQL; the **Care desk** tab shows tickets and transfers.
+**Carrie**, the first-contact customer care voice agent of TAC ("The Automotive Company"), in an app that works like a phone call. Press the green button to call and just talk: Carrie notices when you pause, starts speaking her answer while she's still writing it, and stops when you talk over it. She handles delivery inquiries, EV charging problems, the vehicle app and warranty or service disputes; looks up orders and tickets in a customer care system; adds information to open tickets or opens new ones; and prepares a handover summary for a simulated transfer to a colleague. You can also type, or enter digits on the keypad. The red button hangs up. Every conversation is stored in PostgreSQL; the **Care desk** tab shows tickets and transfers. Transfers put the call on hold; no human agent joins this prototype.
 
 - **Speech recognition:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (English `small.en` by default), on the CPU. Or OpenAI: `gpt-live-transcribe` over the Realtime API while the caller speaks, `gpt-4o-mini-transcribe` for whole recordings
 - **Turn detection:** the [Silero VAD](https://github.com/snakers4/silero-vad) model that faster-whisper ships, via ONNX Runtime
@@ -10,18 +10,25 @@
 
 Everything runs in Docker Compose. The speech models live in [backend/models](backend/models), which the backend container mounts read-write. Whatever is missing there is downloaded at startup, at pinned revisions; on the host, the same code uses the same folder.
 
+## Project documents
+
+- **Target architecture:** [Azure architecture (PDF)](docs/azure-architecture.pdf), with an [editable draw.io diagram](docs/azure-architecture.drawio). This is a proposed production architecture; its capacity and recovery assumptions still need validation.
+- **Prototype architecture:** [Current application architecture (PDF)](docs/current-architecture.pdf), showing the implemented Docker Compose services, interfaces and limitations.
+- **AI-assisted coding note:** [Use of AI tools](docs/ai-tools-usage.md), describing their role in design, implementation and review.
+
 ## Quick start
 
-Requires Docker with Compose v2.
+Requires Docker with Compose v2. **To run Carrie's complaint handling, configure a language-model API key.** The default provider needs `REQUESTY_API_KEY`; local speech recognition and synthesis need no key.
 
 ```sh
-cp .env.example .env   # optional: choose a language model, see below
+cp .env.example .env
+# Edit the copied file: uncomment REQUESTY_API_KEY and set its value before starting.
 make run               # production-like stack on http://localhost:8080
 ```
 
 Open http://localhost:8080. Browsers allow the microphone on `localhost`. Use headphones if you can: the browser's echo cancellation keeps most of the assistant's voice out of the microphone, but what gets through can sound like you talking over it. The first start downloads about 520 MB of speech models into `backend/models`, which takes a minute or two; later starts reuse them.
 
-Without a `.env`, the app talks to `gpt-6.1-sol` through Requesty, which needs only `REQUESTY_API_KEY`; without the key, a fixed reply says the model isn't configured. `VOICE_AGENT_LLM_PROVIDER=echo` repeats what you said and needs no key. Another provider or model is set in `.env`:
+The default language model is `gpt-6.1-sol` through Requesty. Without its key, a fixed reply says the model isn't configured. For a key-free check of speech input and output, set `VOICE_AGENT_LLM_PROVIDER=echo`: it repeats what you said, but does not handle complaints or use Carrie's tools. Configure another provider or model in the same file:
 
 ```sh
 REQUESTY_API_KEY=...                                       # enough for the default model
@@ -34,7 +41,7 @@ VOICE_AGENT_REQUESTY_BASE_URL=https://router.eu.requesty.ai/v1   # the default; 
 
 ### OpenAI speech
 
-The speech models run locally by default, so the app needs no key. To use OpenAI's speech models instead, set in the same file:
+The speech models run locally by default and need no speech-provider key. To use OpenAI's speech models instead, set in the same file:
 
 ```sh
 VOICE_AGENT_STT_PROVIDER=openai   # speech recognition
@@ -56,9 +63,9 @@ make clean # also remove the database volume and the built images (the models in
 
 ## Carrie, the customer care agent
 
-One agent, one set of instructions, six tools ([backend/voice_agent/agent](backend/voice_agent/agent)). The behavior follows the specifications in [dev/](dev/) (delivery, charging, connected services, warranty); [dev/carrie-agent-plan.md](dev/carrie-agent-plan.md) explains the design.
+One agent, one set of instructions, six tools ([backend/voice_agent/agent](backend/voice_agent/agent)). The [topic guides and example dialogues](backend/voice_agent/agent/prompts) cover delivery, charging, connected services and warranty; the [evaluation scenarios](backend/scripts/scenario_eval.py) define expected behavior and checks.
 
-- **Instructions:** [core rules](backend/voice_agent/agent/prompts/core.md) (voice style, empathy, uncertainty, priorities, privacy, commitments, tickets and transfers, language), one guide per topic, and short example dialogues. Before every model call, a state block adds the date and time, the conversation language, the caller's number, verified orders, the tickets of this call, failed identification attempts, transfers and whether danger was reported. Intent, topic switching and resuming a paused topic are left to the model, as the specs ask.
+- **Instructions:** [core rules](backend/voice_agent/agent/prompts/core.md) (voice style, empathy, uncertainty, priorities, privacy, commitments, tickets and transfers, language), one guide per topic, and short example dialogues. Before every model call, a state block adds the date and time, the conversation language, the caller's number, verified orders, the tickets of this call, failed identification attempts, transfers and whether danger was reported. Intent, topic switching and resuming a paused topic are left to the model.
 - **Tools** ([tools.py](backend/voice_agent/agent/tools.py)), each enforcing its own rules in code:
 
   | Tool | What it does | Rules in code |
@@ -67,7 +74,7 @@ One agent, one set of instructions, six tools ([backend/voice_agent/agent](backe
   | `find_open_tickets` | The caller's open tickets | Last name + ticket, order or phone number; the line's number by default. Locked after 2 failures |
   | `add_ticket_note` | New information on a ticket | Only tickets found or created in this call; priority only goes up; reopens a ticket waiting on the customer |
   | `create_ticket` | A ticket for the responsible team | Needs an order number (marked verified or not) and a phone number (the line's by default); one per topic and call |
-  | `handover_to_human` | Transfer to a team | No customer data needed; summary in the conversation language, with the language; the call then goes on hold |
+  | `handover_to_human` | Simulated transfer to a team | No customer data needed; summary in the conversation language, with the language; the call then goes on hold |
   | `set_language` | Switch the conversation language | Only supported languages; others → offer the `language_support` team |
 
 - **Guardrails** ([guardrails.py](backend/voice_agent/agent/guardrails.py)): smoke, fire, sparks, burning smell or overheating (English and German, negations and figures of speech such as "die Hütte brennt" excluded) get the approved safety guidance at once, without the model. Card and IBAN numbers are removed before anything is stored or sent to the model. Every reply sentence is checked before it's shown or spoken: commitments (refunds, rental cars, warranty decisions) are replaced by "the responsible team decides", safety assurances by "I can't confirm that it's safe", and claims of a ticket, a transfer or an emergency call that the tools didn't confirm are left out.
@@ -75,7 +82,7 @@ One agent, one set of instructions, six tools ([backend/voice_agent/agent](backe
 - **Caller number:** the phone page dials from a random German mobile number, new for every call; type your own to call as one of the seeded customers.
 - **Previous calls:** while no call runs, the arrows next to the phone's title step through the stored calls like a carousel (‹ older, › newer and back to the phone), with their transcript, Carrie's tool calls, time, length, number and language.
 - **Feedback:** under a finished call and under each previous call, 👍 or 👎 and an optional comment, stored with the conversation.
-- **Transfers:** `VOICE_AGENT_UNAVAILABLE_ROUTES` (e.g. `roadside_assistance`) lets a team report "no colleague available". A successful transfer puts the call on hold: the yellow button continues the conversation with Carrie, the **Care desk** tab shows the waiting transfer with its summary.
+- **Transfers:** `VOICE_AGENT_UNAVAILABLE_ROUTES` (e.g. `roadside_assistance`) simulates a team reporting "no colleague available". A successful simulated transfer stores the handover and puts the call on hold: the yellow button continues the conversation with Carrie, the **Care desk** tab shows the waiting transfer with its summary. No person joins the call.
 
 ### Customer care system
 
@@ -92,7 +99,7 @@ All cases: [seed_data.py](backend/voice_agent/crm/seed_data.py).
 
 ### Evaluation
 
-`make eval` runs 16 scenarios from the specs against the configured model ([scenario_eval.py](backend/scripts/scenario_eval.py)): a second model plays the caller from a persona, the turns run through the app's own turn path against the starting data in memory, hard checks verify the tools and the call state, and a judge model rates each scenario against the specs' expected behavior and the empathy (1–5). `make eval args="--only DEL-1 CHG-10"` runs a selection, `--no-judge` only the hard checks, `--report eval.md` writes the results.
+`make eval` runs 16 scenarios against the configured model ([scenario_eval.py](backend/scripts/scenario_eval.py)): a second model plays the caller from a persona, the turns run through the app's own turn path against the starting data in memory, hard checks verify the tools and the call state, and a judge model rates each scenario against its expected behavior and the empathy (1–5). The personas, expected behavior and checks are included in the script. `make eval args="--only DEL-1 CHG-10"` runs a selection, `--no-judge` only the hard checks, `--report eval.md` writes the results.
 
 ## How a call works
 
@@ -277,7 +284,7 @@ These are single manual measurements, not a benchmark. They were taken with a 0.
 - One backend process; per-conversation turn locks live in memory.
 - Languages: English with the local speech models; English and German with OpenAI's. The conversation language isn't passed to speech recognition as a hint yet.
 - The transfer is simulated: the handover is stored and the call waits on hold, but no person joins.
-- No silence check-in yet (spec CON-6): a caller who stops responding isn't asked whether they're still there.
+- No silence check-in yet: a caller who stops responding isn't asked whether they're still there.
 
 ## Third-party licences
 
