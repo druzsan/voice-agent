@@ -1,5 +1,7 @@
 """Stand-ins for the database and the speech models, so tests run without them."""
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -16,7 +18,7 @@ from voice_agent.conversation.records import (
     NewMessage,
 )
 from voice_agent.speech.audio import SAMPLE_RATE, write_wav
-from voice_agent.speech.ports import AudioClip, Samples, Transcript
+from voice_agent.speech.ports import AudioChunk, OnAudio, Samples, Transcript
 from voice_agent.speech.vad import FRAME_SAMPLES, SpeechProbability
 
 
@@ -129,17 +131,77 @@ class FakeRecognizer:
 
 
 class FakeSynthesizer:
-    def __init__(self) -> None:
+    """Speaks each text as `pieces` pieces of 50 ms silence."""
+
+    def __init__(self, pieces: int = 2) -> None:
         self.spoken: list[str] = []
+        self.pieces = pieces
         self.fail = False
 
-    async def synthesize(self, text: str) -> AudioClip:
+    async def synthesize(self, text: str, on_audio: OnAudio) -> None:
         if self.fail:
             raise RuntimeError("synthesis failed")
         self.spoken.append(text)
-        return AudioClip(
-            wav=wav_of_silence(0.1), sample_rate=SAMPLE_RATE, duration_ms=100
+        for _ in range(self.pieces):
+            await on_audio(AudioChunk(b"\0\0" * (SAMPLE_RATE // 20), SAMPLE_RATE))
+
+
+class FakePending:
+    def __init__(self, session: "FakeLiveTranscription", audio_ms: int) -> None:
+        self._session = session
+        self._audio_ms = audio_ms
+
+    async def wait(self) -> Transcript:
+        session = self._session
+        if session.fail:
+            raise RuntimeError("live recognition failed")
+        return Transcript(
+            text=session.texts.pop(0) if session.texts else "",
+            audio_ms=self._audio_ms,
+            avg_logprob=None,
+            no_speech_prob=None,
         )
+
+
+class FakeLiveTranscription:
+    """Hears the texts in `texts`, one per committed utterance."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+        self.fail = False
+        # What the call did, in order: "append", "commit", "clear"
+        self.calls: list[str] = []
+        self.samples = 0
+        self.opened = 0
+        self.closed = 0
+
+    async def append(self, samples: Samples) -> None:
+        if not self.calls or self.calls[-1] != "append":
+            self.calls.append("append")
+        self.samples += len(samples)
+
+    async def commit(self) -> FakePending:
+        self.calls.append("commit")
+        audio_ms = round(self.samples / SAMPLE_RATE * 1000)
+        self.samples = 0
+        return FakePending(self, audio_ms)
+
+    async def clear(self) -> None:
+        self.calls.append("clear")
+        self.samples = 0
+
+
+class FakeLiveRecognizer:
+    def __init__(self) -> None:
+        self.session = FakeLiveTranscription()
+
+    @asynccontextmanager
+    async def open(self) -> AsyncGenerator[FakeLiveTranscription]:
+        self.session.opened += 1
+        try:
+            yield self.session
+        finally:
+            self.session.closed += 1
 
 
 class FakeVad:

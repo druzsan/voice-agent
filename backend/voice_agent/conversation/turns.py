@@ -22,7 +22,7 @@ from voice_agent.conversation.repository import ConversationRepository
 from voice_agent.conversation.text import speakable
 from voice_agent.llm.prompts import GREETING
 from voice_agent.llm.responder import Responder
-from voice_agent.speech.audio import read_wav
+from voice_agent.speech.audio import read_wav, synthesize_clip
 from voice_agent.speech.ports import (
     AudioClip,
     SpeechRecognizer,
@@ -235,7 +235,7 @@ class TurnService:
     async def _speak(self, text: str) -> AudioClip | None:
         """The reply as speech; without it the caller can still read the text."""
         try:
-            return await self._synthesizer.synthesize(speakable(text))
+            return await synthesize_clip(self._synthesizer, speakable(text))
         except Exception:
             logger.exception("Speech synthesis failed")
             return None

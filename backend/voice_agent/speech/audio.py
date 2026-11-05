@@ -1,11 +1,12 @@
-"""The recording format the browser sends: WAV with 16 kHz mono 16-bit PCM."""
+"""Audio formats: the browser's recordings (WAV with 16 kHz mono 16-bit PCM)
+and synthesized speech."""
 
 import io
 import wave
 
 import numpy as np
 
-from voice_agent.speech.ports import Samples
+from voice_agent.speech.ports import AudioChunk, AudioClip, Samples, SpeechSynthesizer
 
 SAMPLE_RATE = 16_000
 MIN_DURATION_S = 0.2
@@ -50,3 +51,27 @@ def write_wav(pcm: bytes, sample_rate: int) -> bytes:
         wav.setframerate(sample_rate)
         wav.writeframes(pcm)
     return buffer.getvalue()
+
+
+async def synthesize_clip(synthesizer: SpeechSynthesizer, text: str) -> AudioClip:
+    """The whole spoken text as one WAV clip."""
+    chunks: list[AudioChunk] = []
+
+    async def collect(chunk: AudioChunk) -> None:
+        chunks.append(chunk)
+
+    await synthesizer.synthesize(text, collect)
+    if not chunks:
+        raise ValueError("The synthesizer produced no audio")
+    sample_rate = chunks[0].sample_rate
+    pcm = b"".join(chunk.pcm for chunk in chunks)
+    return AudioClip(
+        wav=write_wav(pcm, sample_rate),
+        sample_rate=sample_rate,
+        duration_ms=round(len(pcm) / 2 / sample_rate * 1000),
+    )
+
+
+def to_pcm16(samples: Samples) -> bytes:
+    """Float samples in [-1, 1] as 16-bit little-endian PCM."""
+    return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()

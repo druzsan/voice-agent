@@ -35,3 +35,27 @@ def test_secrets_stay_out_of_the_representation(
     monkeypatch.setenv("VOICE_AGENT_OPENAI_API_KEY", "sk-very-secret")
 
     assert "sk-very-secret" not in repr(load())
+
+
+def test_openai_speech_is_named_after_its_models() -> None:
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        stt_provider="openai",
+        tts_provider="openai",
+    )
+
+    assert settings.stt_name() == "openai/gpt-4o-mini-transcribe"
+    assert settings.stt_name(live=True) == "openai/gpt-live-transcribe"
+    assert settings.tts_name() == "openai/gpt-4o-mini-tts/marin"
+    assert settings.openai_tts_speed == 1.25
+    # Without live transcription, calls transcribe each utterance as a file
+    no_live = settings.model_copy(update={"openai_stt_live": False})
+    assert no_live.stt_name(live=True) == "openai/gpt-4o-mini-transcribe"
+    assert not no_live.uses_live_stt
+
+
+def test_local_speech_is_named_after_the_model_and_voice() -> None:
+    settings = load()
+
+    assert settings.stt_name(live=True) == "small.en"
+    assert settings.tts_name() == "en_US-lessac-medium"

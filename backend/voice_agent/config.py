@@ -5,6 +5,8 @@ from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LlmProvider = Literal["openai", "requesty", "openrouter", "echo"]
+# local: faster-whisper and Piper on the CPU; openai: OpenAI's speech models
+SpeechProvider = Literal["local", "openai"]
 # English-only Whisper models; larger ones recognize speech more reliably
 # but answer later
 WhisperModelName = Literal["tiny.en", "base.en", "small.en", "medium.en"]
@@ -51,6 +53,11 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = Field(
         default=None, validation_alias=_credential("OPENAI_API_KEY")
     )
+    # Also for the OpenAI speech models; Azure OpenAI's v1 API works as well
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=_credential("OPENAI_BASE_URL"),
+    )
     requesty_api_key: SecretStr | None = Field(
         default=None, validation_alias=_credential("REQUESTY_API_KEY")
     )
@@ -65,12 +72,36 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=1024, gt=0)
     llm_history_messages: int = Field(default=20, ge=0)
 
+    stt_provider: SpeechProvider = "local"
+    tts_provider: SpeechProvider = "local"
+
     stt_model: WhisperModelName = "small.en"
     stt_beam_size: int = Field(default=1, ge=1)
     max_recording_s: float = Field(default=30, gt=0)
     tts_voice: str = Field(
         default="en_US-lessac-medium", pattern=r"^en_[A-Z]{2}-\w+-\w+$"
     )
+
+    # OpenAI speech. One request, connecting the live transcription and
+    # waiting for one of its transcripts each end after openai_timeout_s.
+    openai_timeout_s: float = Field(default=15, gt=0)
+    # Transcribes whole recordings: push-to-talk, and live calls when live
+    # transcription is off or fails
+    openai_stt_model: str = "gpt-4o-mini-transcribe"
+    # Live calls stream the caller's speech to the Realtime API while they
+    # talk, so the transcript is ready shortly after the pause
+    openai_stt_live: bool = True
+    openai_live_stt_model: str = "gpt-live-transcribe"
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "marin"
+    openai_tts_instructions: str = (
+        "Speak in a friendly, warm tone at a brisk, natural conversational pace, "
+        "like an experienced customer service agent on the phone. "
+        "No long pauses between sentences."
+    )
+    # 1.0 is the voice's own pace, which sounds slow on the phone
+    openai_tts_speed: float = Field(default=1.25, ge=0.25, le=4.0)
+
     # Live calls: the caller's turn ends after this much silence; speech
     # shorter than barge_in_ms doesn't interrupt a reply ("mhm", coughs, echo)
     vad_threshold: float = Field(default=0.5, gt=0.15, lt=1)
@@ -80,3 +111,24 @@ class Settings(BaseSettings):
     # Speech model files, downloaded here at startup when missing. Compose
     # mounts the host's backend/models, so both use the same files.
     models_dir: Path = BACKEND_DIR / "models"
+
+    @property
+    def uses_live_stt(self) -> bool:
+        return self.stt_provider == "openai" and self.openai_stt_live
+
+    def stt_name(self, *, live: bool = False) -> str:
+        """The recognizer a conversation runs with, as stored with it."""
+        if self.stt_provider == "local":
+            return self.stt_model
+        model = (
+            self.openai_live_stt_model
+            if live and self.openai_stt_live
+            else self.openai_stt_model
+        )
+        return f"openai/{model}"
+
+    def tts_name(self) -> str:
+        """The voice a conversation runs with, as stored with it."""
+        if self.tts_provider == "local":
+            return self.tts_voice
+        return f"openai/{self.openai_tts_model}/{self.openai_tts_voice}"

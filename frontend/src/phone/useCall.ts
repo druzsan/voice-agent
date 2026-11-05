@@ -3,6 +3,7 @@ import { type RefObject, useEffect, useReducer, useRef } from 'react'
 import { callUrl, type ClientMessage, parseServerMessage } from '../api/callProtocol.ts'
 import type { InputVia } from '../api/conversations.ts'
 import { type Microphone, openMicrophone } from '../audio/microphone.ts'
+import { decodePcm } from '../audio/pcm.ts'
 import { ClipPlayer } from '../audio/playback.ts'
 import { callReducer, initialCallState } from './callState.ts'
 
@@ -84,6 +85,8 @@ export function useCall() {
     const player = new ClipPlayer((clip) => {
       send(socket, { type: 'played', clip })
     })
+    // Still within the click that dials, so the browser allows the sound
+    player.unlock()
     handles.current = { socket, microphone: null, player, muted: false }
 
     socket.onmessage = (event: MessageEvent) => {
@@ -95,7 +98,13 @@ export function useCall() {
         return
       }
       if (message.type === 'audio') {
-        player.enqueue(message)
+        player.append({
+          clip: message.clip,
+          samples: decodePcm(message.pcm_base64),
+          sampleRate: message.sample_rate,
+        })
+      } else if (message.type === 'audio_end') {
+        player.end(message.clip)
       } else if (message.type === 'interrupted') {
         player.stop()
       }

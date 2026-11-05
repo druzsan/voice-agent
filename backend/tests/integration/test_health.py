@@ -15,6 +15,6 @@ def test_status_describes_the_setup(client: TestClient) -> None:
     assert response.json() == {
         "database": "ok",
         "llm": {"provider": "echo", "model": None, "configured": True},
-        "stt": {"model": "small.en", "max_recording_s": 5},
-        "tts": {"model": "en_US-lessac-medium"},
+        "stt": {"provider": "local", "model": "small.en", "max_recording_s": 5},
+        "tts": {"provider": "local", "model": "en_US-lessac-medium"},
     }

@@ -125,6 +125,7 @@ function receive(state: CallState, message: ServerMessage, at: number): CallStat
         notice: END_NOTICES[message.reason] ?? null,
       }
     case 'audio':
+    case 'audio_end':
     case 'interrupted':
     case 'turn_done':
       return state

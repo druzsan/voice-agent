@@ -101,13 +101,25 @@ class SpeechStarted:
 
 
 @dataclass(frozen=True)
+class SpeechAudio:
+    """The current utterance's audio since the last SpeechAudio.
+
+    Together they make up the utterance (pre-roll included), so it can be
+    recognized while the caller still speaks. The last one comes right
+    before SpeechEnded.
+    """
+
+    audio: Samples = field(repr=False)
+
+
+@dataclass(frozen=True)
 class SpeechEnded:
     audio: Samples = field(repr=False)
     # Frames scored as speech, without pauses and pre-roll
     speech_ms: int
 
 
-EndpointEvent = SpeechStarted | SpeechEnded
+EndpointEvent = SpeechStarted | SpeechAudio | SpeechEnded
 
 
 def _frames(milliseconds: int) -> int:
@@ -132,6 +144,8 @@ class Endpointer:
         )
         self._speech_run = 0
         self._utterance: list[Samples] | None = None
+        # Frames of the utterance not yet handed out as SpeechAudio
+        self._fresh: list[Samples] = []
         self._speech_frames = 0
         self._silent_frames = 0
 
@@ -151,6 +165,7 @@ class Endpointer:
         self._before.clear()
         self._speech_run = 0
         self._utterance = None
+        self._fresh = []
 
     def feed(self, pcm: bytes) -> list[EndpointEvent]:
         self._pending.extend(pcm)
@@ -162,9 +177,19 @@ class Endpointer:
             frame = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
             frame /= 32768
             event = self._frame(frame)
+            if isinstance(event, SpeechEnded):
+                events.extend(self._take_fresh())
             if event is not None:
                 events.append(event)
+        events.extend(self._take_fresh())
         return events
+
+    def _take_fresh(self) -> list[SpeechAudio]:
+        if not self._fresh:
+            return []
+        audio = SpeechAudio(np.concatenate(self._fresh))
+        self._fresh = []
+        return [audio]
 
     def _frame(self, frame: Samples) -> EndpointEvent | None:
         settings = self._settings
@@ -178,6 +203,7 @@ class Endpointer:
             if self._speech_run * FRAME_MS < settings.start_ms:
                 return None
             self._utterance = list(self._before)
+            self._fresh = list(self._before)
             self._before.clear()
             self._speech_frames = self._speech_run
             self._silent_frames = 0
@@ -185,6 +211,7 @@ class Endpointer:
             return SpeechStarted()
 
         self._utterance.append(frame)
+        self._fresh.append(frame)
         if probability >= settings.threshold:
             self._speech_frames += 1
             self._silent_frames = 0

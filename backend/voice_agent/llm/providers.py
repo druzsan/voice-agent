@@ -87,7 +87,10 @@ def _provider_model(settings: Settings, model: str) -> Model | None:
             if (key := _key("OPENAI_API_KEY", settings.openai_api_key)) is None:
                 return None
             # The Responses API is OpenAI's recommended one
-            return OpenAIResponsesModel(model, provider=OpenAIProvider(api_key=key))
+            return OpenAIResponsesModel(
+                model,
+                provider=OpenAIProvider(api_key=key, base_url=settings.openai_base_url),
+            )
         case "requesty":
             if (key := _key("REQUESTY_API_KEY", settings.requesty_api_key)) is None:
                 return None

@@ -9,8 +9,8 @@ export type EndReason = 'hangup' | 'page_closed' | 'disconnect' | 'timeout' | 'e
 export interface Status {
   database: 'ok' | 'error'
   llm: { provider: string; model: string | null; configured: boolean }
-  stt: { model: string; max_recording_s: number }
-  tts: { model: string }
+  stt: { provider: string; model: string; max_recording_s: number }
+  tts: { provider: string; model: string }
 }
 
 export async function fetchStatus(signal?: AbortSignal): Promise<Status> {

@@ -21,8 +21,10 @@ vi.mock('./audio/playback.ts', () => ({
     constructor(onPlayed: (clip: number) => void) {
       this.onPlayed = onPlayed
     }
-    enqueue(clip: { clip: number }) {
-      this.onPlayed(clip.clip)
+    unlock = vi.fn()
+    append = vi.fn()
+    end(clip: number) {
+      this.onPlayed(clip)
     }
     stop() {
       audio.stopped += 1
@@ -43,8 +45,8 @@ vi.mock('./audio/microphone.ts', () => ({
 const status: Status = {
   database: 'ok',
   llm: { provider: 'requesty', model: 'azure/gpt-4.1-mini', configured: true },
-  stt: { model: 'small.en', max_recording_s: 30 },
-  tts: { model: 'en_US-lessac-medium' },
+  stt: { provider: 'local', model: 'small.en', max_recording_s: 30 },
+  tts: { provider: 'local', model: 'en_US-lessac-medium' },
 }
 
 // The backend's end of the call
@@ -123,7 +125,8 @@ async function dial(): Promise<FakeSocket> {
     { type: 'call_started', conversation_id: 'c1' },
     { type: 'state', state: 'speaking' },
     { type: 'assistant_delta', turn: 1, text: greeting },
-    { type: 'audio', clip: 1, turn: 1, text: greeting, duration_ms: 900, wav_base64: '' },
+    { type: 'audio', clip: 1, turn: 1, sample_rate: 24000, pcm_base64: 'AAAA' },
+    { type: 'audio_end', clip: 1, turn: 1, text: greeting, duration_ms: 900 },
     {
       type: 'assistant_message',
       id: 1,

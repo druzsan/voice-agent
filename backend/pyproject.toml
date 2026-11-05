@@ -8,6 +8,7 @@ dependencies = [
     "fastapi[standard]>=0.162.0",
     "faster-whisper>=1.2.1",
     "numpy>=2.5.4",
+    "openai>=3.45.0",
     "piper-tts>=1.8.0",
     "psycopg[binary]>=3.3.8",
     "pydantic>=2.14.2",
@@ -40,9 +41,13 @@ typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-# The speech tests need the real models (downloaded on the first run)
-addopts = ["-m", "not speech"]
-markers = ["speech: needs the real speech models (run them with `make test-speech`)"]
+# The speech tests need the real models (downloaded on the first run); the
+# OpenAI tests an API key, and they cost a few cents
+addopts = ["-m", "not speech and not openai"]
+markers = [
+    "speech: needs the real speech models (run them with `make test-speech`)",
+    "openai: calls OpenAI's speech models (run them with `make test-openai`)",
+]
 
 
 [tool.alembic]

@@ -53,8 +53,20 @@ def _piper_files(voice: str) -> tuple[str, ...]:
     )
 
 
-def ensure_models(models_dir: Path, stt_model: str, tts_voice: str) -> None:
-    """Download whichever of the chosen models' files are missing."""
+def ensure_models(
+    models_dir: Path, stt_model: str | None, tts_voice: str | None
+) -> None:
+    """Download whichever of the chosen models' files are missing.
+
+    None skips a model, when its provider isn't local.
+    """
+    if stt_model is not None:
+        _ensure_whisper(models_dir, stt_model)
+    if tts_voice is not None:
+        _ensure_piper(models_dir, tts_voice)
+
+
+def _ensure_whisper(models_dir: Path, stt_model: str) -> None:
     whisper = whisper_dir(models_dir, stt_model)
     if not all((whisper / name).exists() for name in WHISPER_FILES):
         logger.info("Downloading the Whisper model %s to %s", stt_model, whisper)
@@ -64,6 +76,9 @@ def ensure_models(models_dir: Path, stt_model: str, tts_voice: str) -> None:
             local_dir=whisper,
             allow_patterns=list(WHISPER_FILES),
         )
+
+
+def _ensure_piper(models_dir: Path, tts_voice: str) -> None:
     piper = models_dir / "piper"
     for filename in _piper_files(tts_voice):
         if not (piper / filename).exists():

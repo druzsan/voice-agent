@@ -8,6 +8,11 @@ The session is the only one that decides the call's state:
     speaking ─(caller speech ≥ barge_in_ms)→ interrupted → listening
     any ─(hangup | disconnect | max call time | fatal error)→ ended
 
+With live recognition, the caller's audio goes to the recognizer while
+they speak, and the utterance is committed when the pause ends it; if that
+fails, the recording is transcribed as a whole. Replies are spoken sentence
+by sentence, each sent to the browser in pieces as it's synthesized.
+
 Each reply is stored once it's over: played to the end, or interrupted
 (with what the caller heard of it). A single backend process is assumed:
 the state lives in memory, per connection.
@@ -18,6 +23,8 @@ import logging
 import math
 import time
 from collections import deque
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from uuid import UUID
@@ -29,8 +36,9 @@ from anyio.lowlevel import checkpoint_if_cancelled
 from voice_agent.conversation.protocol import (
     AssistantDelta,
     AssistantMessage,
-    AudioClip,
+    AudioEnd,
     AudioFrame,
+    AudioPiece,
     CallEnded,
     CallError,
     CallerSpeech,
@@ -60,10 +68,20 @@ from voice_agent.conversation.turns import heard_nothing
 from voice_agent.llm.prompts import GREETING, LLM_FAILED
 from voice_agent.llm.responder import Responder, StreamedReply
 from voice_agent.speech.audio import SAMPLE_RATE
-from voice_agent.speech.ports import Samples, SpeechRecognizer, SpeechSynthesizer
+from voice_agent.speech.ports import (
+    AudioChunk,
+    LiveRecognizer,
+    LiveTranscription,
+    PendingTranscript,
+    Samples,
+    SpeechRecognizer,
+    SpeechSynthesizer,
+    Transcript,
+)
 from voice_agent.speech.vad import (
     Endpointer,
     EndpointerSettings,
+    SpeechAudio,
     SpeechEnded,
     SpeechStarted,
     VoiceActivityDetector,
@@ -118,6 +136,8 @@ class _Spoken:
     audio: Samples = field(repr=False)
     # When the caller stopped talking (time.perf_counter)
     ended_at: float
+    # Its parts' transcripts from live recognition, if that is in use
+    pending: tuple[PendingTranscript, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -166,8 +186,8 @@ class _Playback:
         self._changed = anyio.Event()
         self.played: set[int] = set()
 
-    def sent(self, clip: int, duration_ms: int) -> None:
-        # The browser plays the clips one after the other
+    def sent(self, clip: int, duration_ms: float) -> None:
+        """More audio of the clip; the browser plays it all one after the other."""
         now = anyio.current_time()
         self._estimated_end = max(self._estimated_end, now) + duration_ms / 1000
         self._outstanding.add(clip)
@@ -210,10 +230,14 @@ class CallSession:
         vad: VoiceActivityDetector,
         setup: CallSetup,
         settings: CallSettings,
+        live_recognizer: LiveRecognizer | None = None,
     ) -> None:
         self._transport = transport
         self._repository = repository
         self._recognizer = recognizer
+        self._live_recognizer = live_recognizer
+        # Set while the call runs, when live recognition is in use
+        self._live: LiveTranscription | None = None
         self._synthesizer = synthesizer
         self._responder = responder
         self._setup = setup
@@ -243,15 +267,18 @@ class CallSession:
         assert conversation_id is not None, "start() first"
         reason: EndReason = "error"
         try:
-            async with anyio.create_task_group() as tasks:
-                tasks.start_soon(self._take_turns)
-                await self._queue(_Greeting())
-                with anyio.move_on_after(self._settings.max_call_s) as deadline:
-                    reason = await self._listen()
-                if deadline.cancelled_caught:
-                    reason = "timeout"
-                # Interrupts a running turn; it stores what it has
-                tasks.cancel_scope.cancel()
+            # Connects while the greeting plays
+            async with self._live_session() as live:
+                self._live = live
+                async with anyio.create_task_group() as tasks:
+                    tasks.start_soon(self._take_turns)
+                    await self._queue(_Greeting())
+                    with anyio.move_on_after(self._settings.max_call_s) as deadline:
+                        reason = await self._listen()
+                    if deadline.cancelled_caught:
+                        reason = "timeout"
+                    # Interrupts a running turn; it stores what it has
+                    tasks.cancel_scope.cancel()
         except Exception:
             logger.exception("Call %s failed", conversation_id)
             reason = "error"
@@ -264,6 +291,17 @@ class CallSession:
                 await self._send(CallEnded(reason=reason))
         logger.info("Call %s ended (%s)", conversation_id, reason)
         return reason
+
+    @asynccontextmanager
+    async def _live_session(self) -> AsyncGenerator[LiveTranscription | None]:
+        if self._live_recognizer is None:
+            yield None
+            return
+        async with self._live_recognizer.open() as live:
+            try:
+                yield live
+            finally:
+                self._live = None
 
     # --- Caller input ----------------------------------------------------------
 
@@ -294,6 +332,9 @@ class CallSession:
             match event:
                 case SpeechStarted():
                     await self._send(CallerSpeech(active=True))
+                case SpeechAudio(audio=audio):
+                    if self._live is not None:
+                        await self._live.append(audio)
                 case SpeechEnded(audio=audio, speech_ms=speech_ms):
                     await self._send(CallerSpeech(active=False))
                     if self._state == "speaking":
@@ -301,9 +342,14 @@ class CallSession:
                             logger.info(
                                 "Ignored %d ms of speech over the reply", speech_ms
                             )
+                            if self._live is not None:
+                                await self._live.clear()
                             continue
                         await self._barge_in()
-                    await self._queue(_Spoken(audio, time.perf_counter()))
+                    # Committed here, in order with the audio, so the next
+                    # utterance can't slip into this one
+                    pending = (await self._live.commit(),) if self._live else ()
+                    await self._queue(_Spoken(audio, time.perf_counter(), pending))
         if (
             self._state == "speaking"
             and self._endpointer.speech_ms >= self._settings.barge_in_ms
@@ -314,6 +360,8 @@ class CallSession:
         self._muted = muted
         if muted and self._endpointer.active:
             self._endpointer.reset()
+            if self._live is not None:
+                await self._live.clear()
             await self._send(CallerSpeech(active=False))
 
     async def _queue(self, item: _Input) -> None:
@@ -324,6 +372,7 @@ class CallSession:
                     self._pending[index] = _Spoken(
                         np.concatenate([waiting.audio, _JOIN_SILENCE, item.audio]),
                         item.ended_at,
+                        waiting.pending + item.pending,
                     )
                     return
         elif (
@@ -383,9 +432,7 @@ class CallSession:
             started, source = item.ended_at, "voice"
             recognizing = time.perf_counter()
             try:
-                transcript = await self._recognizer.transcribe(
-                    item.audio, trim_silence=False
-                )
+                transcript = await self._transcribe(item)
             except Exception:
                 logger.exception("Speech recognition failed")
                 await self._send(
@@ -425,6 +472,25 @@ class CallSession:
         if user_timings:
             reply.timings_ms.update(user_timings)
         await self._answer(reply, history, text)
+
+    async def _transcribe(self, item: _Spoken) -> Transcript:
+        """The live transcripts if in use, else (or when they fail) the recording's."""
+        if item.pending:
+            try:
+                parts = [await pending.wait() for pending in item.pending]
+            except Exception:
+                logger.warning(
+                    "Live recognition failed; transcribing the recording",
+                    exc_info=True,
+                )
+            else:
+                return Transcript(
+                    text=" ".join(part.text for part in parts if part.text),
+                    audio_ms=round(len(item.audio) / SAMPLE_RATE * 1000),
+                    avg_logprob=None,
+                    no_speech_prob=None,
+                )
+        return await self._recognizer.transcribe(item.audio, trim_silence=False)
 
     async def _answer(self, reply: _Reply, history: list[Message], text: str) -> None:
         """The model's reply, spoken sentence by sentence as it's written."""
@@ -500,31 +566,49 @@ class CallSession:
                 await self._speak(reply, sentence)
 
     async def _speak(self, reply: _Reply, sentence: str) -> None:
+        """One sentence, sent to the browser piece by piece as it's synthesized."""
         spoken = speakable(sentence)
         if not spoken:
             return
-        try:
-            clip = await self._synthesizer.synthesize(spoken)
-        except Exception:
-            # The caller still reads the text
-            logger.exception("Speech synthesis failed")
-            return
-        # Interrupted while the voice was synthesized
-        await checkpoint_if_cancelled()
-        self._clip += 1
-        reply.spoken.append((self._clip, sentence))
-        reply.timings_ms.setdefault("first_audio", reply.since_start_ms())
-        self._playback.sent(self._clip, clip.duration_ms)
-        await self._set_state("speaking")
-        await self._send(
-            AudioClip(
-                clip=self._clip,
-                turn=reply.turn,
-                text=sentence,
-                duration_ms=clip.duration_ms,
-                wav_base64=base64.b64encode(clip.wav).decode(),
+        # Numbered at its first piece, so a sentence without audio has none
+        clip: int | None = None
+        duration_ms = 0.0
+
+        async def on_audio(chunk: AudioChunk) -> None:
+            nonlocal clip, duration_ms
+            # Interrupted while the voice was synthesized
+            await checkpoint_if_cancelled()
+            if clip is None:
+                self._clip += 1
+                clip = self._clip
+                reply.spoken.append((clip, sentence))
+                reply.timings_ms.setdefault("first_audio", reply.since_start_ms())
+                await self._set_state("speaking")
+            duration_ms += chunk.duration_ms
+            self._playback.sent(clip, chunk.duration_ms)
+            await self._send(
+                AudioPiece(
+                    clip=clip,
+                    turn=reply.turn,
+                    sample_rate=chunk.sample_rate,
+                    pcm_base64=base64.b64encode(chunk.pcm).decode(),
+                )
             )
-        )
+
+        try:
+            await self._synthesizer.synthesize(spoken, on_audio)
+        except Exception:
+            # The caller still reads the text, and hears what came so far
+            logger.exception("Speech synthesis failed")
+        if clip is not None:
+            await self._send(
+                AudioEnd(
+                    clip=clip,
+                    turn=reply.turn,
+                    text=sentence,
+                    duration_ms=round(duration_ms),
+                )
+            )
 
     async def _finish(self, reply: _Reply) -> None:
         """Waits until the caller has heard the whole reply."""

@@ -15,12 +15,15 @@ class LlmStatus(BaseModel):
 
 
 class SttStatus(BaseModel):
+    provider: str
+    # In a live call; push-to-talk may use another (OpenAI: file transcription)
     model: str
     # The browser stops recording here; longer recordings are refused
     max_recording_s: float
 
 
 class TtsStatus(BaseModel):
+    provider: str
     model: str
 
 
@@ -43,7 +46,9 @@ async def status(services: ServicesDep) -> StatusResponse:
             configured=services.responder.configured,
         ),
         stt=SttStatus(
-            model=settings.stt_model, max_recording_s=settings.max_recording_s
+            provider=settings.stt_provider,
+            model=settings.stt_name(live=services.live_recognizer is not None),
+            max_recording_s=settings.max_recording_s,
         ),
-        tts=TtsStatus(model=settings.tts_voice),
+        tts=TtsStatus(provider=settings.tts_provider, model=settings.tts_name()),
     )

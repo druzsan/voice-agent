@@ -69,3 +69,18 @@ export class Framer {
     return frames
   }
 }
+
+// Mono 16-bit little-endian PCM, base64-encoded as the backend sends it
+export function decodePcm(base64: string): Int16Array<ArrayBuffer> {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length - (binary.length % 2))
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  const view = new DataView(bytes.buffer)
+  const samples = new Int16Array(bytes.length / 2)
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = view.getInt16(index * 2, true)
+  }
+  return samples
+}

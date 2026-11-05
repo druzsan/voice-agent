@@ -13,13 +13,14 @@ import numpy as np
 import pytest
 
 from voice_agent.config import Settings
-from voice_agent.speech.audio import SAMPLE_RATE
+from voice_agent.speech.audio import SAMPLE_RATE, synthesize_clip
 from voice_agent.speech.model_files import ensure_models, piper_voice_file, whisper_dir
 from voice_agent.speech.ports import Samples
 from voice_agent.speech.vad import (
     Endpointer,
     EndpointerSettings,
     SileroVad,
+    SpeechAudio,
     SpeechEnded,
     SpeechStarted,
 )
@@ -63,7 +64,9 @@ def test_piper_speech_is_recognized_by_whisper(
     synthesizer, recognizer = models
 
     async def roundtrip() -> str:
-        clip = await synthesizer.synthesize("Please call me back tomorrow morning.")
+        clip = await synthesize_clip(
+            synthesizer, "Please call me back tomorrow morning."
+        )
         assert clip.duration_ms > 1000
         transcript = await recognizer.transcribe(to_16_khz(clip.wav))
         assert transcript.no_speech_prob is not None and transcript.no_speech_prob < 0.5
@@ -79,7 +82,7 @@ def test_the_voice_detection_cuts_speech_out_of_silence(
     models: tuple["PiperSynthesizer", "FasterWhisperRecognizer"],
 ) -> None:
     synthesizer, recognizer = models
-    clip = anyio.run(synthesizer.synthesize, "I'd like to book a table for two.")
+    clip = anyio.run(synthesize_clip, synthesizer, "I'd like to book a table for two.")
     speech = to_16_khz(clip.wav)
     silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
     audio = np.concatenate([silence, speech, silence, silence])
@@ -91,6 +94,7 @@ def test_the_voice_detection_cuts_speech_out_of_silence(
         event
         for start in range(0, len(pcm), 1024)
         for event in endpointer.feed(pcm[start : start + 1024])
+        if not isinstance(event, SpeechAudio)
     ]
 
     assert [type(event) for event in events] == [SpeechStarted, SpeechEnded]

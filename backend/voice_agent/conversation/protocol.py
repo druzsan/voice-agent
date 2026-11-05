@@ -108,15 +108,28 @@ class AssistantDelta(BaseModel):
     text: str
 
 
-class AudioClip(BaseModel):
-    """One spoken sentence of turn `turn`; clips play in order of `clip`."""
+class AudioPiece(BaseModel):
+    """More audio of a spoken sentence (clip) of turn `turn`.
+
+    Clips play in order of `clip`, their pieces in the order they arrive.
+    """
 
     type: Literal["audio"] = "audio"
     clip: int
     turn: int
+    sample_rate: int
+    # Mono 16-bit little-endian PCM
+    pcm_base64: str
+
+
+class AudioEnd(BaseModel):
+    """The clip's last piece has been sent."""
+
+    type: Literal["audio_end"] = "audio_end"
+    clip: int
+    turn: int
     text: str
     duration_ms: int
-    wav_base64: str
 
 
 class AssistantMessage(BaseModel):
@@ -167,7 +180,8 @@ ServerMessage = (
     | CallerSpeech
     | UserMessage
     | AssistantDelta
-    | AudioClip
+    | AudioPiece
+    | AudioEnd
     | AssistantMessage
     | Interrupted
     | TurnDone

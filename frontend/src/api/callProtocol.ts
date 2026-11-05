@@ -43,13 +43,24 @@ export interface AssistantDelta {
   text: string
 }
 
-export interface AudioClip {
+// More audio of a spoken sentence (clip); clips play in order of `clip`,
+// their pieces in the order they arrive
+export interface AudioPiece {
   type: 'audio'
+  clip: number
+  turn: number
+  sample_rate: number
+  // Mono 16-bit little-endian PCM
+  pcm_base64: string
+}
+
+// The clip's last piece has been sent
+export interface AudioEnd {
+  type: 'audio_end'
   clip: number
   turn: number
   text: string
   duration_ms: number
-  wav_base64: string
 }
 
 export interface AssistantMessage {
@@ -89,7 +100,8 @@ export type ServerMessage =
   | CallerSpeech
   | UserMessage
   | AssistantDelta
-  | AudioClip
+  | AudioPiece
+  | AudioEnd
   | AssistantMessage
   | Interrupted
   | TurnDone
@@ -103,6 +115,7 @@ const SERVER_MESSAGE_TYPES: ReadonlySet<string> = new Set<ServerMessage['type']>
   'user_message',
   'assistant_delta',
   'audio',
+  'audio_end',
   'assistant_message',
   'interrupted',
   'turn_done',

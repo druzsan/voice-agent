@@ -60,6 +60,10 @@ test-backend: ## Run backend tests (pytest; in-memory storage, no containers)
 test-speech: ## Run the speech tests with the real models (downloaded into backend/models if missing)
 	$(UV_RUN) pytest -m speech
 
+.PHONY: test-openai
+test-openai: ## Run the tests against OpenAI's speech models (needs OPENAI_API_KEY; costs a few cents)
+	$(UV_RUN) pytest -m openai
+
 .PHONY: test-frontend
 test-frontend: ## Run frontend tests (vitest)
 	$(PNPM) test

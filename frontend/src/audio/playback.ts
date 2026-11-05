@@ -1,72 +1,170 @@
-export interface Clip {
+// A piece of a spoken sentence (clip): mono 16-bit PCM
+export interface AudioPiece {
   clip: number
-  wav_base64: string
-  duration_ms: number
+  samples: Int16Array
+  sampleRate: number
+}
+
+interface Clip {
+  id: number
+  // Audio held back until enough has arrived to play without a gap
+  waiting: AudioBuffer[]
+  waitingSeconds: number
+  sources: Set<AudioBufferSourceNode>
+  // Context time of its first sample and after its last one
+  start: number | null
+  end: number
+  // The server sent all of its audio
+  complete: boolean
+  reported: boolean
 }
 
 // A clip counts as heard from this share on, even if it's stopped
 const HEARD_SHARE = 0.9
+// Pieces are scheduled slightly ahead, so they join without a click
+const LEAD_SECONDS = 0.05
+// A sentence's first piece is short and the next follows a moment later,
+// so its playback waits for this much audio, or for the whole sentence
+const START_SECONDS = 0.3
 
-// Plays a reply's clips one after the other as they arrive, and reports
-// each one the caller has heard, so the backend knows what was said
+// Plays a reply's sentences one after the other while their audio still
+// arrives, and reports each one the caller has heard, so the backend knows
+// what was said
 export class ClipPlayer {
   private readonly onPlayed: (clip: number) => void
-  private readonly queue: Clip[] = []
-  private current: { clip: Clip; element: HTMLAudioElement } | null = null
+  private readonly createContext: () => AudioContext | null
+  private context: AudioContext | null = null
+  private clips: Clip[] = []
+  // Context time at which the next piece starts
+  private cursor = 0
 
-  constructor(onPlayed: (clip: number) => void) {
+  constructor(
+    onPlayed: (clip: number) => void,
+    // None where the browser has no Web Audio: the text is shown anyway
+    createContext: () => AudioContext | null = () =>
+      typeof AudioContext === 'undefined' ? null : new AudioContext(),
+  ) {
     this.onPlayed = onPlayed
+    this.createContext = createContext
   }
 
-  enqueue(clip: Clip): void {
-    this.queue.push(clip)
-    if (this.current === null) {
-      this.next()
-    }
+  // Browsers allow sound only after a user gesture: call this from one
+  unlock(): void {
+    void this.ensureContext()?.resume()
   }
 
-  // Stops at once and drops the queued clips, e.g. when the caller interrupts
-  stop(): void {
-    this.queue.length = 0
-    const current = this.current
-    this.current = null
-    if (current) {
-      const { element, clip } = current
-      if (element.duration > 0 && element.currentTime / element.duration >= HEARD_SHARE) {
-        this.onPlayed(clip.clip)
-      }
-      element.pause()
-    }
-  }
-
-  private next(): void {
-    const clip = this.queue.shift()
-    if (!clip) {
-      this.current = null
+  append({ clip: id, samples, sampleRate }: AudioPiece): void {
+    const context = this.ensureContext()
+    if (!context || samples.length === 0) {
       return
     }
-    const element = new window.Audio(`data:audio/wav;base64,${clip.wav_base64}`)
-    this.current = { clip, element }
-    const advance = (played: boolean) => {
-      if (this.current?.element !== element) {
-        return
+    const clip = this.clip(id)
+    const buffer = context.createBuffer(1, samples.length, sampleRate)
+    const channel = buffer.getChannelData(0)
+    for (let index = 0; index < samples.length; index += 1) {
+      channel[index] = (samples[index] ?? 0) / 32768
+    }
+    if (clip.start === null) {
+      clip.waiting.push(buffer)
+      clip.waitingSeconds += buffer.duration
+      if (clip.waitingSeconds >= START_SECONDS) {
+        this.release(context, clip)
       }
-      if (played) {
-        this.onPlayed(clip.clip)
+    } else {
+      this.schedule(context, clip, buffer)
+    }
+  }
+
+  // The clip's last piece has arrived
+  end(id: number): void {
+    const clip = this.clip(id)
+    clip.complete = true
+    if (this.context) {
+      this.release(this.context, clip)
+    }
+    this.reportIfPlayed(clip)
+  }
+
+  // Stops at once and drops the queued audio, e.g. when the caller interrupts
+  stop(): void {
+    const now = this.context?.currentTime ?? 0
+    for (const clip of this.clips) {
+      if (
+        clip.complete &&
+        clip.start !== null &&
+        now - clip.start >= HEARD_SHARE * (clip.end - clip.start)
+      ) {
+        this.report(clip)
       }
-      this.next()
+      for (const source of clip.sources) {
+        source.onended = null
+        source.stop()
+      }
     }
-    element.onended = () => {
-      advance(true)
+    this.clips = []
+    this.cursor = 0
+  }
+
+  private ensureContext(): AudioContext | null {
+    this.context ??= this.createContext()
+    return this.context
+  }
+
+  private clip(id: number): Clip {
+    let clip = this.clips.find((candidate) => candidate.id === id)
+    if (!clip) {
+      clip = {
+        id,
+        waiting: [],
+        waitingSeconds: 0,
+        sources: new Set(),
+        start: null,
+        end: 0,
+        complete: false,
+        reported: false,
+      }
+      this.clips.push(clip)
     }
-    // Unplayable or refused (autoplay rules): the text is shown anyway, and
-    // the backend stops waiting for it after a while
-    element.onerror = () => {
-      advance(false)
+    return clip
+  }
+
+  private release(context: AudioContext, clip: Clip): void {
+    const waiting = clip.waiting
+    clip.waiting = []
+    clip.waitingSeconds = 0
+    for (const buffer of waiting) {
+      this.schedule(context, clip, buffer)
     }
-    element.play().catch(() => {
-      advance(false)
-    })
+  }
+
+  private schedule(context: AudioContext, clip: Clip, buffer: AudioBuffer): void {
+    const start = Math.max(this.cursor, context.currentTime + LEAD_SECONDS)
+    const source = context.createBufferSource()
+    source.buffer = buffer
+    source.connect(context.destination)
+    source.onended = () => {
+      clip.sources.delete(source)
+      this.reportIfPlayed(clip)
+    }
+    source.start(start)
+    clip.sources.add(source)
+    clip.start ??= start
+    clip.end = start + buffer.duration
+    this.cursor = clip.end
+  }
+
+  private reportIfPlayed(clip: Clip): void {
+    if (clip.complete && clip.sources.size === 0 && clip.waiting.length === 0) {
+      this.report(clip)
+      this.clips = this.clips.filter((candidate) => candidate !== clip)
+    }
+  }
+
+  private report(clip: Clip): void {
+    if (!clip.reported) {
+      clip.reported = true
+      this.onPlayed(clip.id)
+    }
   }
 }
 

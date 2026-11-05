@@ -31,13 +31,13 @@ class Call:
 
     async def next(self) -> dict[str, Any]:
         message: dict[str, Any] = json.loads(await asyncio.wait_for(self.ws.recv(), 60))
-        if message["type"] == "audio":
-            if self.first_audio_at is None:
-                self.first_audio_at = time.perf_counter()
+        if message["type"] == "audio" and self.first_audio_at is None:
+            self.first_audio_at = time.perf_counter()
+        if message["type"] == "audio_end":
             # Played at once: the script doesn't listen
             await self.ws.send(json.dumps({"type": "played", "clip": message["clip"]}))
-            message["wav_base64"] = f"<{message['duration_ms']} ms>"
-        if message["type"] != "assistant_delta":
+        # The text and the audio pieces would flood the output
+        if message["type"] not in ("assistant_delta", "audio"):
             print("<", json.dumps(message), flush=True)
         return message
 

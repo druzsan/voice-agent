@@ -9,6 +9,7 @@ from voice_agent.speech.vad import (
     Endpointer,
     EndpointerSettings,
     EndpointEvent,
+    SpeechAudio,
     SpeechEnded,
     SpeechStarted,
 )
@@ -34,10 +35,15 @@ def scripted(probabilities: list[float]) -> tuple[Endpointer, bytes]:
     return Endpointer(probability, SETTINGS), frames.tobytes()
 
 
+def kinds(events: list[EndpointEvent]) -> list[type]:
+    """The events without the audio handed out along the way."""
+    return [type(event) for event in events if not isinstance(event, SpeechAudio)]
+
+
 def ended(events: list[EndpointEvent]) -> SpeechEnded:
-    assert [type(event) for event in events] == [SpeechStarted, SpeechEnded]
-    assert isinstance(events[1], SpeechEnded)
-    return events[1]
+    assert kinds(events) == [SpeechStarted, SpeechEnded]
+    assert isinstance(events[-1], SpeechEnded)
+    return events[-1]
 
 
 def frame_numbers(audio: Samples) -> list[int]:
@@ -81,11 +87,7 @@ def test_a_long_utterance_ends_without_a_pause() -> None:
 
     events = endpointer.feed(audio)
 
-    assert [type(event) for event in events] == [
-        SpeechStarted,
-        SpeechEnded,
-        SpeechStarted,
-    ]
+    assert kinds(events) == [SpeechStarted, SpeechEnded, SpeechStarted]
 
 
 def test_speech_so_far_is_known_while_the_caller_talks() -> None:
@@ -102,3 +104,34 @@ def test_speech_so_far_is_known_while_the_caller_talks() -> None:
 
     endpointer.reset()
     assert (endpointer.active, endpointer.speech_ms) == (False, 0)
+
+
+def test_the_audio_is_handed_out_while_the_caller_talks() -> None:
+    endpointer, audio = scripted([0.0] * 5 + [0.9] * 10 + [0.0] * 12)
+    frame = FRAME_SAMPLES * 2
+
+    # Up to the start, then frame by frame
+    events = endpointer.feed(audio[: 10 * frame])
+    for start in range(10 * frame, len(audio), frame):
+        events += endpointer.feed(audio[start : start + frame])
+
+    assert type(events[0]) is SpeechStarted
+    pieces = [event.audio for event in events if isinstance(event, SpeechAudio)]
+    # The last piece comes before the end
+    assert isinstance(events[-2], SpeechAudio)
+    assert isinstance(events[-1], SpeechEnded)
+    # Pre-roll included; unlike the ended utterance, nothing is trimmed
+    assert frame_numbers(pieces[0]) == list(range(2, 10))
+    # Up to the end of the pause (10 frames)
+    assert frame_numbers(np.concatenate(pieces)) == list(range(2, 25))
+
+
+def test_no_audio_is_handed_out_outside_of_an_utterance() -> None:
+    endpointer, audio = scripted([0.9] * 4 + [0.0] * 20)
+
+    assert endpointer.feed(audio) == []
+
+    endpointer, audio = scripted([0.9] * 8)
+    endpointer.feed(audio)
+    endpointer.reset()
+    assert endpointer.feed(b"") == []

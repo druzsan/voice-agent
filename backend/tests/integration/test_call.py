@@ -1,5 +1,6 @@
 """Live calls over WS /api/call, with fake voice detection and speech models."""
 
+import base64
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -15,6 +16,7 @@ from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
 from tests.fakes import (
+    FakeLiveRecognizer,
     FakeRecognizer,
     FakeSynthesizer,
     InMemoryConversationRepository,
@@ -49,7 +51,7 @@ class Caller:
         while True:
             message = self.next()
             seen.append(message)
-            if message["type"] == "audio" and play:
+            if message["type"] == "audio_end" and play:
                 self.played(message["clip"])
             if message["type"] == type_ and all(
                 message.get(key) == value for key, value in fields.items()
@@ -124,8 +126,14 @@ def test_the_call_starts_with_the_spoken_greeting(
     assert started["type"] == "call_started"
     assert types.index("state") < types.index("audio")
     assert greeting[0] == {"type": "assistant_delta", "turn": 1, "text": GREETING}
-    clips = [m for m in greeting if m["type"] == "audio"]
+    clips = [m for m in greeting if m["type"] == "audio_end"]
     assert " ".join(c["text"] for c in clips) == GREETING
+    # Each clip in pieces as it's synthesized, then its end
+    first = [m for m in greeting if m.get("clip") == clips[0]["clip"]]
+    assert [m["type"] for m in first] == ["audio", "audio", "audio_end"]
+    assert first[0]["sample_rate"] == 16_000
+    assert base64.b64decode(first[0]["pcm_base64"]) == bytes(1600)
+    assert first[-1]["duration_ms"] == 100
     final = next(m for m in greeting if m["type"] == "assistant_message")
     assert final["source"] == "template" and final["interrupted"] is False
     assert stored(repository)[0] == ("template", GREETING)
@@ -180,7 +188,7 @@ def test_talking_over_the_reply_interrupts_it(
         caller.until("state", state="listening")
         caller.say("Tell me a story. Make it long.")
         # The first sentence plays, the rest doesn't
-        first = caller.until("audio", play=False)[-1]
+        first = caller.until("audio_end", play=False)[-1]
         caller.played(first["clip"])
         ws.send_bytes(pcm(0.6, loud=True))
         interrupted = caller.until("interrupted")
@@ -200,7 +208,7 @@ def test_a_short_sound_over_the_reply_doesnt_interrupt_it(
     caller: Caller, repository: InMemoryConversationRepository
 ) -> None:
     caller.say("Tell me a story. Make it long.")
-    caller.until("audio", play=False)
+    caller.until("audio_end", play=False)
     caller.ws.send_bytes(pcm(0.2, loud=True) + pcm(1, loud=False))
     turn = caller.until("turn_done")
 
@@ -308,7 +316,7 @@ def test_the_next_prompt_says_what_the_caller_heard(
         caller = Caller(ws)
         caller.until("state", state="listening")
         caller.say("Talk")
-        first = caller.until("audio", play=False)[-1]
+        first = caller.until("audio_end", play=False)[-1]
         caller.played(first["clip"])
         ws.send_bytes(pcm(0.6, loud=True))
         caller.until("assistant_message")
@@ -452,3 +460,110 @@ def test_messages_during_a_turn_are_answered_after_it(
         "Second",
         "Once upon a time. The end.",
     ]
+
+
+@pytest.fixture
+def live() -> FakeLiveRecognizer:
+    return FakeLiveRecognizer()
+
+
+@pytest.fixture
+def live_caller(services: Services, live: FakeLiveRecognizer) -> Iterator[Caller]:
+    app = create_app(services=replace(services, live_recognizer=live))
+    with TestClient(app) as client, client.websocket_connect("/api/call") as ws:
+        caller = Caller(ws)
+        caller.until("state", state="listening")
+        yield caller
+
+
+def test_live_recognition_hears_the_caller_while_they_speak(
+    live_caller: Caller,
+    live: FakeLiveRecognizer,
+    recognizer: FakeRecognizer,
+    repository: InMemoryConversationRepository,
+) -> None:
+    live.session.texts = ["Is my car ready?"]
+    live_caller.speak(1)
+    turn = live_caller.until("turn_done")
+
+    user = next(m for m in turn if m["type"] == "user_message")
+    assert user["text"] == "Is my car ready?"
+    assert live.session.calls == ["append", "commit"]
+    # Pre-roll, speech and the pause went to the live session
+    assert recognizer.heard == []
+    assert live.session.opened == 1
+    stored_user = repository.messages[1]
+    assert stored_user.stt is not None and stored_user.stt["audio_ms"] >= 1000
+    conversation = next(iter(repository.conversations.values()))
+    assert conversation.stt_model == "small.en"
+
+
+def test_a_failing_live_recognition_falls_back_to_the_recording(
+    live_caller: Caller, live: FakeLiveRecognizer, recognizer: FakeRecognizer
+) -> None:
+    live.session.fail = True
+    live_caller.speak(1)
+    turn = live_caller.until("turn_done")
+
+    user = next(m for m in turn if m["type"] == "user_message")
+    assert user["text"] == "What time is it?"
+    assert len(recognizer.heard) == 1
+
+
+def test_ignored_speech_is_dropped_from_the_live_session(
+    live_caller: Caller, live: FakeLiveRecognizer
+) -> None:
+    live_caller.say("Tell me a story. Make it long.")
+    live_caller.until("audio_end", play=False)
+    live_caller.ws.send_bytes(pcm(0.2, loud=True) + pcm(1, loud=False))
+    live_caller.until("turn_done")
+
+    assert live.session.calls == ["append", "clear"]
+
+
+def test_muting_drops_the_live_audio(
+    live_caller: Caller, live: FakeLiveRecognizer
+) -> None:
+    live_caller.ws.send_bytes(pcm(0.5, loud=True))
+    live_caller.until("caller_speech", active=True)
+    live_caller.ws.send_json({"type": "mute", "muted": True})
+    live_caller.until("caller_speech", active=False)
+
+    assert live.session.calls == ["append", "clear"]
+
+
+def test_utterances_answered_together_join_their_live_transcripts(
+    services: Services, live: FakeLiveRecognizer
+) -> None:
+    release = threading.Event()
+
+    async def stream(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> AsyncIterator[str]:
+        while not release.is_set():
+            await anyio.sleep(0.01)
+        yield "Sure."
+
+    model = FunctionModel(stream_function=stream)
+    live.session.texts = ["My car is late.", "And it's red."]
+    app = create_app(
+        services=replace(
+            services, responder=Responder(model, 5, 100), live_recognizer=live
+        )
+    )
+    with TestClient(app) as client, client.websocket_connect("/api/call") as ws:
+        caller = Caller(ws)
+        caller.until("state", state="listening")
+        caller.say("First")
+        caller.until("state", state="thinking")
+        # Two utterances while the model still thinks: answered as one
+        caller.speak(0.3)
+        caller.until("caller_speech", active=False)
+        caller.speak(0.3)
+        caller.until("caller_speech", active=False)
+        release.set()
+        turn = caller.until("turn_done", turn=3)
+
+    user = next(m for m in turn if m["type"] == "user_message")
+    assert user["text"] == "My car is late. And it's red."
+    assert live.session.calls == ["append", "commit", "append", "commit"]
