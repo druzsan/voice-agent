@@ -26,7 +26,14 @@ def test_keys_have_their_conventional_names_too(
 def test_empty_values_count_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VOICE_AGENT_LLM_MODEL", "")
 
-    assert load().llm_model is None
+    assert load().llm_model == "azure/gpt-6.1-sol@germanywestcentral"
+
+
+def test_the_default_model_is_reached_through_the_eu_router() -> None:
+    settings = load()
+
+    assert settings.llm_provider == "requesty"
+    assert settings.requesty_base_url == "https://router.eu.requesty.ai/v1"
 
 
 def test_secrets_stay_out_of_the_representation(

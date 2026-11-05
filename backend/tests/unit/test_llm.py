@@ -63,7 +63,8 @@ def test_requesty_uses_its_router() -> None:
     model = build_model(settings("requesty", requesty_api_key="secret"))
 
     assert isinstance(model, OpenAIChatModel)
-    assert model.base_url == "https://router.requesty.ai/v1/"
+    # The EU router by default
+    assert model.base_url == "https://router.eu.requesty.ai/v1/"
 
 
 def test_echo_needs_no_model_or_key() -> None:

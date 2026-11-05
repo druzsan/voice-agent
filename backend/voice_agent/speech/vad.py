@@ -85,7 +85,7 @@ class EndpointerSettings:
     # This much speech in a row starts an utterance
     start_ms: int = 160
     # This much silence ends it
-    silence_ms: int = 700
+    silence_ms: int = 800
     # Audio from before the start that belongs to the utterance (the start of
     # the first word scores low)
     pre_roll_ms: int = 320

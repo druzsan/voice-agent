@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     """App settings, read from environment variables prefixed with VOICE_AGENT_.
 
     Provider credentials also accept their conventional names without the
-    prefix (e.g. OPENAI_API_KEY). See .env.example for descriptions.
+    prefix (e.g. OPENAI_API_KEY). .env.example shows the common ones.
     """
 
     model_config = SettingsConfigDict(
@@ -48,12 +48,20 @@ class Settings(BaseSettings):
         "postgresql+psycopg://voice_agent:voice_agent@127.0.0.1:5432/voice_agent"
     )
 
-    llm_provider: LlmProvider = "echo"
-    llm_model: str | None = None
+    # gpt-6.1-sol on Azure in Germany, through Requesty's EU router. Without
+    # REQUESTY_API_KEY the model isn't configured and a fixed reply is spoken;
+    # echo repeats the caller and needs no key. Only the selected provider's
+    # key is used.
+    llm_provider: LlmProvider = "requesty"
+    # Model ID as the provider lists it, e.g. gpt-4.1-mini for openai,
+    # openai/gpt-4.1-mini for openrouter (always with the upstream provider)
+    llm_model: str | None = "azure/gpt-6.1-sol@germanywestcentral"
     openai_api_key: SecretStr | None = Field(
         default=None, validation_alias=_credential("OPENAI_API_KEY")
     )
-    # Also for the OpenAI speech models; Azure OpenAI's v1 API works as well
+    # Also for the OpenAI speech models. For Azure OpenAI:
+    # https://<resource>.openai.azure.com/openai/v1/ with the Azure key and the
+    # deployment names as models
     openai_base_url: str = Field(
         default="https://api.openai.com/v1",
         validation_alias=_credential("OPENAI_BASE_URL"),
@@ -62,22 +70,33 @@ class Settings(BaseSettings):
         default=None, validation_alias=_credential("REQUESTY_API_KEY")
     )
     requesty_base_url: str = Field(
-        default="https://router.requesty.ai/v1",
+        default="https://router.eu.requesty.ai/v1",
         validation_alias=_credential("REQUESTY_BASE_URL"),
     )
     openrouter_api_key: SecretStr | None = Field(
         default=None, validation_alias=_credential("OPENROUTER_API_KEY")
     )
+    # Seconds for one complete answer, after which a fallback reply is spoken
     llm_timeout_s: float = Field(default=20, gt=0)
+    # Upper bound for one answer; reasoning models count their hidden reasoning
+    # too, so this leaves room even though spoken answers are short
     llm_max_tokens: int = Field(default=1024, gt=0)
+    # Earlier messages sent to the model as conversation history
     llm_history_messages: int = Field(default=20, ge=0)
 
+    # local: faster-whisper and Piper on the CPU, audio stays on this machine;
+    # openai: OpenAI's speech models (needs OPENAI_API_KEY with API credit)
     stt_provider: SpeechProvider = "local"
     tts_provider: SpeechProvider = "local"
 
+    # Local Whisper model; larger ones recognize more reliably but answer later
     stt_model: WhisperModelName = "small.en"
+    # 1 is greedy decoding, the fastest
     stt_beam_size: int = Field(default=1, ge=1)
+    # Longest accepted recording; in a live call, an utterance ends here even
+    # without a pause
     max_recording_s: float = Field(default=30, gt=0)
+    # Local Piper voice
     tts_voice: str = Field(
         default="en_US-lessac-medium", pattern=r"^en_[A-Z]{2}-\w+-\w+$"
     )
@@ -102,11 +121,15 @@ class Settings(BaseSettings):
     # 1.0 is the voice's own pace, which sounds slow on the phone
     openai_tts_speed: float = Field(default=1.25, ge=0.25, le=4.0)
 
-    # Live calls: the caller's turn ends after this much silence; speech
-    # shorter than barge_in_ms doesn't interrupt a reply ("mhm", coughs, echo)
+    # Live calls. Speech probability (0-1) from which a 32 ms frame counts as
+    # speech: higher ignores more noise, but also quiet speech
     vad_threshold: float = Field(default=0.5, gt=0.15, lt=1)
-    vad_silence_ms: int = Field(default=700, ge=100)
+    # The caller's turn ends after this much silence: shorter answers sooner,
+    # but cuts off callers who pause mid-sentence
+    vad_silence_ms: int = Field(default=800, ge=100)
+    # Speech shorter than this doesn't interrupt a reply ("mhm", coughs, echo)
     barge_in_ms: int = Field(default=400, ge=0)
+    # Longest call; it ends with the reason "timeout"
     max_call_s: float = Field(default=900, gt=0)
     # Speech model files, downloaded here at startup when missing. Compose
     # mounts the host's backend/models, so both use the same files.

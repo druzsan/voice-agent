@@ -41,6 +41,8 @@ services:
         required: false
     environment:
       VOICE_AGENT_DATABASE_URL: postgresql+psycopg://voice_agent:${POSTGRES_PASSWORD:-voice_agent}@postgres:5432/voice_agent
+      # Also from the shell, e.g. echo in CI; empty means the default
+      VOICE_AGENT_LLM_PROVIDER: ${VOICE_AGENT_LLM_PROVIDER:-}
     volumes:
       # The speech models: the same folder as on the host, where the app
       # downloads missing ones at startup. It's part of the repository (empty),

@@ -5,7 +5,7 @@ A minimal voice conversation app that works like a phone call. Press the green b
 - **Speech recognition:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (English `small.en` by default), on the CPU. Or OpenAI: `gpt-live-transcribe` over the Realtime API while the caller speaks, `gpt-4o-mini-transcribe` for whole recordings
 - **Turn detection:** the [Silero VAD](https://github.com/snakers4/silero-vad) model that faster-whisper ships, via ONNX Runtime
 - **Speech synthesis:** [Piper](https://github.com/OHF-Voice/piper1-gpl) (voice `en_US-lessac-medium` by default), on the CPU. Or OpenAI: `gpt-4o-mini-tts` (voice `marin`), played as it's generated
-- **Language model:** [PydanticAI](https://ai.pydantic.dev/) with OpenAI, [Requesty](https://www.requesty.ai/) or [OpenRouter](https://openrouter.ai/). It answers plainly, with no tools or agent logic yet. The `echo` provider repeats the caller and needs no key.
+- **Language model:** [PydanticAI](https://ai.pydantic.dev/) with OpenAI, [Requesty](https://www.requesty.ai/) or [OpenRouter](https://openrouter.ai/). By default `gpt-6.1-sol` on Azure in Germany, through Requesty's EU router. It answers plainly, with no tools or agent logic yet. The `echo` provider repeats the caller and needs no key.
 - **Storage:** PostgreSQL with SQLAlchemy and Alembic migrations
 
 Everything runs in Docker Compose. The speech models live in [backend/models](backend/models), which the backend container mounts read-write. Whatever is missing there is downloaded at startup, at pinned revisions; on the host, the same code uses the same folder.
@@ -21,16 +21,16 @@ make run               # production-like stack on http://localhost:8080
 
 Open http://localhost:8080. Browsers allow the microphone on `localhost`. Use headphones if you can: the browser's echo cancellation keeps most of the assistant's voice out of the microphone, but what gets through can sound like you talking over it. The first start downloads about 520 MB of speech models into `backend/models`, which takes a minute or two; later starts reuse them.
 
-Without a `.env`, the app uses the `echo` provider: the whole voice loop works and the assistant repeats what you said. For real answers, set a provider, a model and its key in `.env`:
+Without a `.env`, the app talks to `gpt-6.1-sol` through Requesty, which needs only `REQUESTY_API_KEY`; without the key, a fixed reply says the model isn't configured. `VOICE_AGENT_LLM_PROVIDER=echo` repeats what you said and needs no key. Another provider or model is set in `.env`:
 
 ```sh
-VOICE_AGENT_LLM_PROVIDER=requesty                    # openai, requesty, openrouter or echo
-VOICE_AGENT_LLM_MODEL=azure/gpt-4.1-mini@francecentral
-VOICE_AGENT_REQUESTY_API_KEY=...                     # or REQUESTY_API_KEY
-VOICE_AGENT_REQUESTY_BASE_URL=https://router.eu.requesty.ai/v1   # if your organization requires the EU router
+REQUESTY_API_KEY=...                                       # enough for the default model
+VOICE_AGENT_LLM_PROVIDER=requesty                          # openai, requesty, openrouter or echo
+VOICE_AGENT_LLM_MODEL=azure/gpt-6.1-sol@germanywestcentral # model ID as the provider lists it
+VOICE_AGENT_REQUESTY_BASE_URL=https://router.eu.requesty.ai/v1   # the default; global: https://router.requesty.ai/v1
 ```
 
-[.env.example](.env.example) describes every setting. `make llm-smoke` asks the configured model one question, which checks the provider, model ID and key without the UI. The idle screen shows which model the app uses.
+[.env.example](.env.example) shows the choices for the language model and the speech models; [config.py](backend/voice_agent/config.py) describes every setting. `make llm-smoke` asks the configured model one question, which checks the provider, model ID and key without the UI. The idle screen shows which model the app uses.
 
 ### OpenAI speech
 
@@ -59,7 +59,7 @@ make clean # also remove the database volume and the built images (the models in
 A call is one WebSocket connection (`/api/call`), and one conversation. Connecting starts it, losing the connection ends it:
 
 1. **Green button.** The browser connects and opens the microphone. The backend creates the conversation and speaks the greeting.
-2. **Just talk.** The browser streams the microphone continuously as 16 kHz mono PCM (an AudioWorklet downsamples it), in 32 ms frames. The backend scores each frame with Silero VAD: 160 ms of speech start an utterance, and a pause of 700 ms ends it.
+2. **Just talk.** The browser streams the microphone continuously as 16 kHz mono PCM (an AudioWorklet downsamples it), in 32 ms frames. The backend scores each frame with Silero VAD: 160 ms of speech start an utterance, and a pause of 800 ms ends it.
 3. **The backend answers:**
    - Whisper transcribes the utterance. Silence or likely invented words (high no-speech probability) count as "nothing heard", and nothing is stored. With OpenAI, the utterance's audio goes to a Realtime transcription session while the caller speaks, and the pause commits it, so the transcript arrives shortly after; if that fails, the recording is transcribed as a file. An empty transcript counts as "nothing heard".
    - The caller's message is stored.
@@ -180,27 +180,27 @@ Live calls, `echo`, for a 2.3 s spoken question streamed in real time (`make cal
 
 | Stage | Time |
 |---|---|
-| Pause until the turn ends (`VOICE_AGENT_VAD_SILENCE_MS`) | 0.7 s |
+| Pause until the turn ends (`VOICE_AGENT_VAD_SILENCE_MS`, then 700) | 0.7 s |
 | Speech recognition | 0.60–0.64 s |
 | Model's first text, first sentence synthesized and sent (`first_audio` − `stt`) | 0.05 s |
 | **End of the recording → first audio, as the caller hears it** | **1.18–1.23 s** |
 
 The recording ends with Piper's own trailing silence of about 0.2 s, which already counts toward the pause, so the stages add up to a bit more than the measured total.
 
-Compared with push-to-talk, the caller no longer taps, but waits for the 0.7 s pause instead. In exchange, speech starts after the model's first sentence rather than after the whole answer and its synthesis: with a real model, the first audio comes at about `stt` + time to the model's first sentence + one sentence of synthesis (about 0.05–0.1 s), however long the answer is. The live-call numbers with a hosted model are still to be measured.
+Compared with push-to-talk, the caller no longer taps, but waits for the pause instead (0.8 s by default, as in the earlier German prototype). In exchange, speech starts after the model's first sentence rather than after the whole answer and its synthesis: with a real model, the first audio comes at about `stt` + time to the model's first sentence + one sentence of synthesis (about 0.05–0.1 s), however long the answer is. The live-call numbers with a hosted model are still to be measured.
 
 Live calls with OpenAI speech (live transcription, `gpt-4o-mini-tts`), `echo`, for an 8.4 s spoken question, four calls:
 
 | Stage | Time |
 |---|---|
-| Pause until the turn ends | 0.7 s |
+| Pause until the turn ends (then 700 ms) | 0.7 s |
 | Live transcript ready (`stt`) | 0.48–0.75 s |
 | First sentence's first audio piece sent (`first_audio` − `stt`) | 1.1–1.9 s |
 | **End of the recording → first audio sent** | **1.95–2.93 s** |
 
 Live transcription is about as fast as local Whisper on this machine, so its gain is offloading the CPU, not latency. Synthesis is the slow stage: OpenAI's speech stream starts with about 85 ms of audio 0.5–1 s after the request, then pauses for another 0.25–0.5 s, which is why the browser buffers 0.3 s before it starts a sentence. Piper takes 0.05–0.1 s per sentence. Push-to-talk with OpenAI, same question: transcription 1.1 s, synthesis of the whole 5.9 s answer 1.8 s.
 
-These are single manual measurements, not a benchmark. Each stored message carries its own timings.
+These are single manual measurements, not a benchmark. They were taken with a 0.7 s pause; the default is now 0.8 s, which adds 0.1 s to every live-call answer. Each stored message carries its own timings.
 
 ## Limits
 
