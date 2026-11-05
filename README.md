@@ -49,7 +49,7 @@ VOICE_AGENT_TTS_PROVIDER=openai   # speech synthesis
 OPENAI_API_KEY=...                # needs API credit on platform.openai.com
 ```
 
-Either one can be switched on its own. With OpenAI, the caller's audio and the answers' text go to OpenAI; with `local`, speech stays on this machine. No speech model is downloaded for a provider that isn't `local`. The defaults follow the tuning of the earlier German prototype: the voice `marin` at speed 1.25 (1.0 sounds slow on the phone) with instructions for a friendly, brisk phone manner. `VOICE_AGENT_OPENAI_BASE_URL` points both the speech models and the `openai` language model at another endpoint, e.g. Azure OpenAI's v1 API (not tested here). `make test-openai` checks the key and the models with a short spoken sentence (a few cents).
+Either one can be switched on its own. With OpenAI, the caller's audio and the answers' text go to OpenAI; with `local`, speech stays on this machine. No speech model is downloaded for a provider that isn't `local`. The defaults are tuned for the phone: the voice `marin` at speed 1.25 (1.0 sounds slow on the phone) with instructions for a friendly, brisk phone manner. `VOICE_AGENT_OPENAI_BASE_URL` points both the speech models and the `openai` language model at another endpoint, e.g. Azure OpenAI's v1 API (not tested here). `make test-openai` checks the key and the models with a short spoken sentence (a few cents).
 
 The `make` targets are only shortcuts; run `make` to list them. Without `make`, run the commands from the matching target in the [Makefile](Makefile).
 
@@ -282,7 +282,7 @@ Live calls, `echo`, for a 2.3 s spoken question streamed in real time (`make cal
 
 The recording ends with Piper's own trailing silence of about 0.2 s, which already counts toward the pause, so the stages add up to a bit more than the measured total.
 
-Compared with push-to-talk, the caller no longer taps, but waits for the pause instead (0.8 s by default, as in the earlier German prototype). In exchange, speech starts after the model's first sentence rather than after the whole answer and its synthesis: with a real model, the first audio comes at about `stt` + time to the model's first sentence + one sentence of synthesis (about 0.05–0.1 s), however long the answer is. The live-call numbers with a hosted model are still to be measured.
+Compared with push-to-talk, the caller no longer taps, but waits for the pause instead (0.8 s by default). In exchange, speech starts after the model's first sentence rather than after the whole answer and its synthesis: with a real model, the first audio comes at about `stt` + time to the model's first sentence + one sentence of synthesis (about 0.05–0.1 s), however long the answer is. The live-call numbers with a hosted model are still to be measured.
 
 Live calls with OpenAI speech (live transcription, `gpt-4o-mini-tts`), `echo`, for an 8.4 s spoken question, four calls:
 
