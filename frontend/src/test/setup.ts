@@ -29,3 +29,6 @@ class ResizeObserverStub {
   disconnect = vi.fn()
 }
 window.ResizeObserver = ResizeObserverStub
+
+// The transcript scrolls to its newest message
+Element.prototype.scrollTo = vi.fn()

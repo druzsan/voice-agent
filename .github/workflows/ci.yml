@@ -96,6 +96,14 @@ jobs:
           cache-dependency-glob: backend/uv.lock
       - run: make init-backend
       - run: make test-backend
+      # The real speech models (about 520 MB), downloaded into backend/models
+      # when the cache doesn't have them
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: backend/models
+          key: speech-models-${{ hashFiles('backend/voice_agent/speech/model_files.py', 'backend/voice_agent/config.py') }}
+          restore-keys: speech-models-
+      - run: make test-speech
 
   test-frontend:
     name: 🧪 Frontend tests
@@ -119,7 +127,7 @@ jobs:
   containers:
     name: 🐋 Containers (${{ matrix.mode }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -143,23 +151,45 @@ jobs:
           source: .
           files: ${{ matrix.bake-files }}
           load: true
+          # migrate is built from the same definition as backend, so it reuses its cache
           set: |
             backend.tags=voice-agent-backend
+            migrate.tags=voice-agent-migrate
             frontend.tags=voice-agent-frontend
             backend.cache-from=type=gha,scope=backend-${{ matrix.mode }}
             backend.cache-to=type=gha,scope=backend-${{ matrix.mode }},mode=max
+            migrate.cache-from=type=gha,scope=backend-${{ matrix.mode }}
             frontend.cache-from=type=gha,scope=frontend-${{ matrix.mode }}
             frontend.cache-to=type=gha,scope=frontend-${{ matrix.mode }},mode=max
 
       - if: matrix.mode == 'development'
         run: mkdir -p backend/.venv frontend/node_modules
 
-      - run: docker compose up --no-build --wait --wait-timeout 120
+      # The speech models the backend tests saved, so the backend doesn't
+      # download them again at startup (it does when the cache misses)
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: backend/models
+          key: speech-models-${{ hashFiles('backend/voice_agent/speech/model_files.py', 'backend/voice_agent/config.py') }}
+          restore-keys: speech-models-
 
+      - run: docker compose up --no-build --wait --wait-timeout 600
+
+      # The models and the migrations agree (nothing left to autogenerate)
+      - run: docker compose run --rm --no-deps migrate alembic check
+
+      # Through the frontend port, so the frontend-backend wiring is part of it.
+      # The LLM provider is echo (no .env in CI): the whole turn without a secret.
       - name: Smoke test
         run: |
           curl -fsS --retry 10 --retry-all-errors --retry-delay 2 http://127.0.0.1:8080/ | grep -q '<div id="root"></div>'
-          curl -fsS --retry 10 --retry-all-errors --retry-delay 2 http://127.0.0.1:8080/api/health | grep -q '"status":"ok"'
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 2 http://127.0.0.1:8080/api/status | grep -q '"database":"ok"'
+          id=$(curl -fsS -X POST http://127.0.0.1:8080/api/conversations | jq -er .conversation.id)
+          curl -fsS -X POST -H 'content-type: application/json' -d '{"text": "Hello CI"}' \
+            "http://127.0.0.1:8080/api/conversations/$id/turns/text" \
+            | jq -e '.assistant_message.text == "You said: Hello CI" and .audio.duration_ms > 0'
+          curl -fsS -X POST "http://127.0.0.1:8080/api/conversations/$id/end"
+          curl -fsS "http://127.0.0.1:8080/api/conversations/$id" | jq -e '.end_reason == "hangup" and (.messages | length) == 3'
 
       - if: failure()
         run: docker compose logs

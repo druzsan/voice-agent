@@ -32,6 +32,21 @@ updates:
       - dependency-name: nginx
         update-types: [version-update:semver-major, version-update:semver-minor]
 
+  # The PostgreSQL image in compose.yaml
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      docker-compose:
+        patterns: ["*"]
+    ignore:
+      # Major versions need a dump and restore of the database volume
+      - dependency-name: postgres
+        update-types: [version-update:semver-major]
+
   - package-ecosystem: uv
     directory: /backend
     schedule:

@@ -1,0 +1,3 @@
+# Speech models, downloaded by the app at startup (see voice_agent/speech/model_files.py)
+*
+!.gitignore
