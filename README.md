@@ -97,6 +97,29 @@ A simulated CRM in its own PostgreSQL schema `crm` ([backend/voice_agent/crm](ba
 
 All cases: [seed_data.py](backend/voice_agent/crm/seed_data.py).
 
+### Demo journey: Lukas calls about his delayed car
+
+Play **Lukas Fischer**, a customer waiting for his BMW 330e Touring. His seeded order has an expired delivery estimate and a status last updated 35 days before the data was loaded. An open delivery ticket already records that logistics was asked for an update. This journey demonstrates uncertainty handling, updating an existing case and a simulated human handover.
+
+Complete the [quick start](#quick-start) with a working language-model API key. Use English for this walkthrough so it works with the default local speech models. In the phone page, enter **`+49 151 22000104`** as the caller number before pressing the green call button. Use the microphone and listen to Carrie's spoken replies.
+
+| Detail | Value to give when asked |
+|---|---|
+| Name on the order | Lukas Fischer |
+| Order number | `610938` (say each digit separately) |
+| Postal code | `70173` (say each digit separately) |
+| Vehicle | BMW 330e Touring |
+
+Follow Carrie's questions naturally; the wording and order of her replies may vary.
+
+1. **Raise the complaint.** Say: “Hi, I'm Lukas Fischer. I'm still waiting for my BMW, and the delivery estimate has already passed. I'm frustrated that I still don't know when it will arrive.” Carrie should acknowledge the frustration and ask for the missing identification details before disclosing order information.
+2. **Verify the order.** Supply the details above as requested. Carrie should look up the order, explain that the recorded status is outdated and the estimate has passed, and offer help from a colleague. She should not invent a delay reason or promise a new date.
+3. **Update the existing case before transferring.** Say: “Before you transfer me, please update my existing delivery ticket. I now need the car for work next Monday, and I'd like the delivery team to clarify when it will arrive.” Confirm the proposed note if asked. Carrie should find the open ticket and add this new information instead of creating a duplicate. The work deadline is information supplied by the caller, not an existing CRM fact.
+4. **Request the handover.** Say: “Yes, please connect me with someone in the delivery team, and pass on what we've discussed.” Carrie should request the transfer with a concise summary and put the call on hold after the tool confirms it. No human joins this prototype.
+5. **Inspect the result.** Open **Care desk**. Check that Lukas's delivery ticket has the new note and that a transfer to the delivery team appears. Its summary should carry the verified order and vehicle, the outdated status and expired estimate, the caller's reported work deadline, the ticket update and the request for a reliable delivery update, in English. End the call with the red button; its transcript and tool calls remain available under previous calls.
+
+The intended outcome is an updated ticket and a handover with context. Delivery itself remains unresolved, and no replacement car, compensation or delivery date has been promised. Dates depend on when the starting data was loaded; repeated runs add notes and handovers to the same customer case.
+
 ### Evaluation
 
 `make eval` runs 16 scenarios against the configured model ([scenario_eval.py](backend/scripts/scenario_eval.py)): a second model plays the caller from a persona, the turns run through the app's own turn path against the starting data in memory, hard checks verify the tools and the call state, and a judge model rates each scenario against its expected behavior and the empathy (1–5). The personas, expected behavior and checks are included in the script. `make eval args="--only DEL-1 CHG-10"` runs a selection, `--no-judge` only the hard checks, `--report eval.md` writes the results.
