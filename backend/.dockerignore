@@ -1,6 +1,9 @@
-# Allowlist: only the dependency manifests and the app code reach the build
+# Allowlist: only the dependency manifests, the entrypoint, the migrations and
+# the app code reach the build (never the downloaded models)
 *
 !pyproject.toml
 !uv.lock
+!entrypoint.sh
+!migrations/
 !voice_agent/
 **/__pycache__

@@ -6,6 +6,10 @@ MAKEFLAGS += --warn-undefined-variables --no-builtin-rules
 UV_RUN := uv --directory backend run
 PNPM := pnpm --dir frontend
 DEV_COMPOSE := docker compose -f compose.yaml -f compose.dev.yaml
+# Message of a new migration (make db-revision m="...")
+m ?=
+# Arguments of the scripted live call (make call-smoke args="...")
+args ?=
 
 .PHONY: help
 help: ## List the available targets
@@ -49,8 +53,16 @@ pre-commit: ## Run all pre-commit hooks on all files
 test: test-backend test-frontend ## Run backend and frontend tests
 
 .PHONY: test-backend
-test-backend: ## Run backend tests (pytest)
+test-backend: ## Run backend tests (pytest; in-memory storage, no containers)
 	$(UV_RUN) pytest
+
+.PHONY: test-speech
+test-speech: ## Run the speech tests with the real models (downloaded into backend/models if missing)
+	$(UV_RUN) pytest -m speech
+
+.PHONY: test-openai
+test-openai: ## Run the tests against OpenAI's speech models (needs OPENAI_API_KEY; costs a few cents)
+	$(UV_RUN) pytest -m openai
 
 .PHONY: test-frontend
 test-frontend: ## Run frontend tests (vitest)
@@ -72,6 +84,29 @@ dev: ## Run the dev stack with hot reload on http://localhost:8080 (backend on :
 	$(DEV_COMPOSE) rm --stop --force --volumes
 	$(DEV_COMPOSE) up --build
 
+.PHONY: db-upgrade
+db-upgrade: ## Apply the database migrations to the dev database
+	mkdir -p backend/.venv
+	$(DEV_COMPOSE) run --rm --build migrate
+
+.PHONY: db-revision
+db-revision: ## Generate a migration from the models against the dev database: make db-revision m="add x"
+	@test -n "$(m)" || { echo 'Usage: make db-revision m="describe the change"'; exit 1; }
+	$(UV_RUN) alembic upgrade head
+	$(UV_RUN) alembic revision --autogenerate -m "$(m)"
+
+.PHONY: psql
+psql: ## Open psql on the dev database
+	$(DEV_COMPOSE) exec postgres psql --username voice_agent voice_agent
+
+.PHONY: llm-smoke
+llm-smoke: ## Ask the configured language model one question (settings from .env)
+	$(UV_RUN) python -m scripts.llm_smoke
+
+.PHONY: call-smoke
+call-smoke: ## Make a scripted live call against the running stack: make call-smoke args="--speak question.wav"
+	$(UV_RUN) python -m scripts.call_smoke $(args)
+
 .PHONY: down
 down: ## Stop and remove the containers
 	$(DEV_COMPOSE) down
@@ -81,5 +116,5 @@ logs: ## Follow the container logs
 	$(DEV_COMPOSE) logs --follow
 
 .PHONY: clean
-clean: ## Remove containers, volumes and the locally built images
+clean: ## Remove containers, volumes (including the database) and the locally built images
 	$(DEV_COMPOSE) down --volumes --rmi local
